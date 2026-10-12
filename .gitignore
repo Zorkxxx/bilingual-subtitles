@@ -1,0 +1,36 @@
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Credentials and local editor state
+.env
+.env.*
+*.key
+*.pem
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Keep task media, outputs, private libraries and raw logs outside this repository
+/data/
+/tasks/
+/records/
+/cache/
+/delivery/
+/test-results/
+/artifacts/
+*.mkv
+*.mp4
+*.mov
+*.avi
+*.wav
+*.mp3
+*.flac
+*.srt
+*.ass
+*.zip
+*.log

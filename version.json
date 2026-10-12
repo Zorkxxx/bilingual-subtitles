@@ -1,0 +1,16 @@
+{
+  "skill_version": "1.0.0",
+  "released": "2026-10-12",
+  "project_schema_version": 1,
+  "records_schema_version": 1,
+  "library_schema_version": 1,
+  "decisions_revision": 1,
+  "changes": [
+    {
+      "version": "1.0.0",
+      "date": "2026-10-12",
+      "summary": "首版：字幕工作流、独立核实状态、字体自选、剧情画面文字、持久俚语库、断点数据、双格式导出与 ZIP 验收。独立试用后明确原文字区和译文显示区、附录上屏模式，并修复 checkpoint 自行改变记录哈希的误报。",
+      "decisions": "references/decisions.md"
+    }
+  ]
+}
