@@ -1,15 +1,33 @@
 {
-  "skill_version": "1.0.0",
-  "released": "2026-10-12",
+  "skill_version": "1.01",
+  "released": "2026-10-13",
   "project_schema_version": 1,
   "records_schema_version": 1,
   "library_schema_version": 1,
-  "decisions_revision": 1,
+  "decisions_revision": 4,
   "changes": [
     {
       "version": "1.0.0",
       "date": "2026-10-12",
       "summary": "首版：字幕工作流、独立核实状态、字体自选、剧情画面文字、持久俚语库、断点数据、双格式导出与 ZIP 验收。独立试用后明确原文字区和译文显示区、附录上屏模式，并修复 checkpoint 自行改变记录哈希的误报。",
+      "decisions": "references/decisions.md"
+    },
+    {
+      "version": "1.0.1",
+      "date": "2026-10-13",
+      "summary": "修复 ASS 位置跳动：中英文独立固定语言带，同期对白使用持续期间不变的槽位；百分秒边界统一就近取整，增加行容量与画面容纳检查，校正 ASS 事件计数并补充连续播放验收。",
+      "decisions": "references/decisions.md"
+    },
+    {
+      "version": "1.1.0",
+      "date": "2026-10-13",
+      "summary": "制作前展示字号、字体和位置的实际 ASS 效果图并询问选择；支持底部、中部和顶部固定语言带，保存组合预览及所选样式指纹，未确认或样式改变时阻止最终导出。保留旧记录兼容及同批剧集预设复用。",
+      "decisions": "references/decisions.md"
+    },
+    {
+      "version": "1.01",
+      "date": "2026-10-13",
+      "summary": "1.01 是用户指定的 GitHub 发布版本，包含此前 1.0.1 的 ASS 位置跳动修复和 1.1.0 的字号、字体与位置效果图选择流程；保留全部本地版本历史，数据 schema 不变。",
       "decisions": "references/decisions.md"
     }
   ]

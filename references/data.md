@@ -17,7 +17,7 @@ python scripts/project.py invalidate --work-dir <任务目录> --video-id <ID> -
 
 - schema_version=1；skill_version 独立于数据 schema，task_id 稳定，revision/history 留下操作。
 - videos 每项包含 id、path、records 相对路径、fingerprint 和 stages。
-- config 保存语言、编码、字体预设、画面字模式、持久 library_path 与 decisions_revision。
+- config 保存语言、编码、已确认的字体/字号/位置预设、画面字模式、持久 library_path 与 decisions_revision。config.style 的复用范围以用户确认为准。
 - glossary 保存本作品的名字、称呼和术语，不自动写入全局俚语库。
 - stages 为 inspect/references/transcription/translation/timing/visual/qa/delivery，各阶段 pending/in_progress/draft/complete/stale。complete 必须写实际证据，不能靠状态声称人工精听。
 
@@ -32,7 +32,8 @@ python scripts/project.py invalidate --work-dir <任务目录> --video-id <ID> -
   "video": {"id": "video-a", "path": "<输入视频路径>", "basename": "Example.S01E01", "duration_ms": 60000, "width": 1920, "height": 1080},
   "review_scope": "说明实际听辨/翻译/时间/画面检查范围。",
   "sources": [{"id": "ref-a", "title": "来源名称", "url": "<实际URL或本地出处>", "version_match": "开中末锚点已核/尚未核", "note": "版本差异"}],
-  "style": {"font_en": "Arial", "font_zh": "Microsoft YaHei", "font_onscreen": "Microsoft YaHei", "font_size_en": 42, "font_size_zh": 46, "font_size_onscreen": 40, "outline": 1.5, "margin_bottom": 60},
+  "style": {"font_en": "Arial", "font_zh": "Microsoft YaHei", "font_onscreen": "Microsoft YaHei", "font_size_en": 42, "font_size_zh": 46, "font_size_onscreen": 40, "outline": 1.5, "margin_bottom": 60, "margin_top": 60, "dialogue_position": "bottom", "dialogue_en_lines": 2, "dialogue_zh_lines": 2, "dialogue_line_height": 1.35, "dialogue_gap": 8},
+  "style_selection": {"status": "pending"},
   "cues": [{
     "id": "audio-0007", "kind": "dialogue", "start_ms": 1200, "end_ms": 3400,
     "en": "<实际听辨原文>", "zh": "<对应译文>", "include": true,
@@ -55,7 +56,11 @@ python scripts/project.py invalidate --work-dir <任务目录> --video-id <ID> -
 
 画面文字 `onscreen` 可含 full_en/full_zh、display_mode（缺省 chinese）、appendix、source_region、region。source_region 保存实际原文字区供核对，region 指字幕显示区域供 ASS 定位，两者均为归一化 `[x,y,w,h]`；具体判断见 visual.md。屏幕只显示中文时仍保存对应英文原文。
 
-style 数值均以 1080p 为基准，按视频高度缩放。config.style 是新片预设，导出读取每片 records.style；用户修改全任务预设时须同步预期使用该预设的每片并标记 style 失效。
+style 的字号、描边、`margin_bottom`、`margin_top` 和 `dialogue_gap` 以 1080p 为基准，按视频高度缩放。上/下边距默认 60；`dialogue_position` 为 bottom/middle/top，默认 bottom，均水平居中。`dialogue_en_lines`、`dialogue_zh_lines` 是 1–8 的整数行容量，默认各 2；`dialogue_line_height` 是 1–3 的预留行高倍率，默认 1.35，三者均不缩放。语言间距 `dialogue_gap` 默认 8。这些字段用于对白/歌词的固定语言带与静态槽位，不根据每条 cue 的行数改变位置，也不会自动缩小字体。显式行数超容量由 lint 报错，自动换行的实际行数、字体行高及溢出须按 visual.md 真实渲染验收。
+
+`style_selection.status` 为 pending/confirmed/waived。confirmed 保存 `confirmation`（用户实际答复）、`option_ids`（各组选项 ID）、`style_sha256`（完整有效、未缩放 style 的规范化摘要）、`preview_image`（综合效果图路径）与 `preview_sha256`（图片哈希）；预览清单另保存实际样例/帧与渲染条件。waived 仅在用户明确同意跳过预览时保存 confirmation 与 style_sha256，并记录原因。具体流程见 [style-selection.md](style-selection.md)。pending 不能最终导出；confirmed/waived 的 style_sha256 与当前有效 style 不符也不能导出。恢复任务核对摘要与图片哈希；摘要一致只证明配置和文件未变，不证明字体渲染、位置或内容已经验收。
+
+config.style 是新片预设，导出读取每片 records.style。选择完成后将配置同步到 project.config.style，仅更新用户确认适用的单片或同一批次；其它任务不自动改变。同批连续集复用确认时保存该确认来源及当前有效 style_sha256。修改全任务预设时同步预期使用该预设的每片，保留 revision/history，并标记 visual/qa/delivery 失效；不修改台词、时码、原有核实状态或证据。
 
 ## 并行审校与修改
 
@@ -71,4 +76,4 @@ python scripts/project.py apply-patch --records <单片JSON> --patch <修订JSON
 
 ## 迁移与版本
 
-第一版只接收 schema_version=1，不自动猜测或降级未来 schema。版本更新流程见 decisions.md；持久俚语库不随 skill 安装/升级覆写。初版不把旧 Skins 字幕或未核的候选记忆冒充通用已核数据。
+1.01 仍只接收 schema_version=1，不自动猜测或降级未来 schema。旧记录缺少新增 style 字段时使用兼容默认值，缺少 style_selection 的旧记录可供脚本兼容读取；这不代表用户已经选择排版，开始新的制作/修复任务仍须执行效果图与选择流程。不要自动改写旧记录或覆盖旧字幕；重新导出后须重新完成视觉验收。版本更新流程见 decisions.md；持久俚语库不随 skill 安装/升级覆写。初版不把旧 Skins 字幕或未核的候选记忆冒充通用已核数据。

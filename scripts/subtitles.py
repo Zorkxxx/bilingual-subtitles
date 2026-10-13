@@ -23,7 +23,7 @@ import zipfile
 
 
 SCHEMA_VERSION = 1
-TOOL_VERSION = "1.0.0"
+TOOL_VERSION = "1.01"
 STATUSES = {"pending", "draft", "verified", "stale", "not_applicable"}
 DIMENSIONS = ("english", "translation", "timing", "visual")
 KINDS = {"dialogue", "onscreen", "lyric"}
@@ -32,6 +32,9 @@ DEFAULT_STYLE = {
     "font_onscreen": "Microsoft YaHei", "font_size_en": 42,
     "font_size_zh": 46, "font_size_onscreen": 40, "outline": 1.5,
     "margin_bottom": 60, "color": "&H00FFFFFF",
+    "dialogue_en_lines": 2, "dialogue_zh_lines": 2,
+    "dialogue_line_height": 1.35, "dialogue_gap": 8,
+    "dialogue_position": "bottom", "margin_top": 60,
 }
 ALLOWED_DELIVERY_SUFFIXES = {".srt", ".ass", ".md", ".txt"}
 MOJIBAKE = re.compile(r"锟斤拷|鐨勬|涓|Ã[\x80-\xff]|â€|ä½|æ[\x80-\xbf]|\\u[0-9a-fA-F]{4}")
@@ -184,17 +187,40 @@ def lint_records(records):
         font = style[field]
         if not isinstance(font, str) or not font.strip() or re.search(r"[,{}\\\r\n\x00-\x1f\x7f]", font):
             issue("error", "unsafe_font", f"style.{field}", "Font family must be nonempty and cannot contain ASS delimiters or control characters.")
-    for field in ("font_size_en", "font_size_zh", "font_size_onscreen", "outline", "margin_bottom"):
+    for field in ("font_size_en", "font_size_zh", "font_size_onscreen", "outline", "margin_bottom", "margin_top", "dialogue_gap"):
         number = style[field]
-        lower = 0 if field in {"outline", "margin_bottom"} else 1
+        lower = 0 if field in {"outline", "margin_bottom", "margin_top", "dialogue_gap"} else 1
         if not is_number(number) or number < lower or number > 1080:
             issue("error", "style_number", f"style.{field}", f"Expected a finite 1080p-base number in [{lower}, 1080].")
         elif field.startswith("font_size") and number > 108:
             issue("warning", "large_font", f"style.{field}", "Font size exceeds 10% of frame height; render and check occlusion.")
         elif field == "margin_bottom" and number > 540:
             issue("warning", "large_margin", f"style.{field}", "Bottom margin exceeds half of frame height.")
+    for field in ("dialogue_en_lines", "dialogue_zh_lines"):
+        if not is_integer(style[field]) or not 1 <= style[field] <= 8:
+            issue("error", "dialogue_lines", f"style.{field}", "Expected an integer line capacity in [1, 8].")
+    if not is_number(style["dialogue_line_height"]) or not 1 <= style["dialogue_line_height"] <= 3:
+        issue("error", "dialogue_line_height", "style.dialogue_line_height", "Expected a font-height multiplier in [1, 3]; verify actual font metrics by rendering.")
+    if not isinstance(style["dialogue_position"], str) or style["dialogue_position"] not in {"bottom", "middle", "top"}:
+        issue("error", "dialogue_position", "style.dialogue_position", "Expected bottom, middle or top.")
     if not isinstance(style["color"], str) or not re.fullmatch(r"&H[0-9A-Fa-f]{8}", style["color"]):
         issue("error", "style_color", "style.color", "Expected ASS &HAABBGGRR, e.g. &H00FFFFFF.")
+    selection = records.get("style_selection")
+    if selection is not None:
+        if not isinstance(selection, dict) or selection.get("status") not in {"pending", "confirmed", "waived"}:
+            issue("error", "style_selection", "style_selection", "Expected pending, confirmed or explicitly waived style selection.")
+        elif selection["status"] == "pending":
+            issue("warning", "style_pending", "style_selection", "Show the size/font/position previews and obtain the user's choice before final export.")
+        else:
+            if not isinstance(selection.get("confirmation"), str) or not selection["confirmation"].strip():
+                issue("error", "style_confirmation", "style_selection", "Record the user's actual choice or explicit decision to skip previews.")
+            if not errors and selection.get("style_sha256") != style_digest(records):
+                issue("error", "style_changed", "style_selection", "Current style differs from the user's confirmed preview; update the preview and selection before export.")
+            if selection["status"] == "confirmed" and (
+                    not isinstance(selection.get("preview_image"), str) or not selection["preview_image"].strip()
+                    or not isinstance(selection.get("preview_sha256"), str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", selection["preview_sha256"])):
+                issue("error", "style_preview", "style_selection", "Confirmed selection requires its actual preview image and SHA256.")
 
     cues = records.get("cues")
     if not isinstance(cues, list):
@@ -227,10 +253,15 @@ def lint_records(records):
             issue("error", "out_of_range", where, "Cue extends beyond video.duration_ms.")
         elif include is True:
             valid_intervals.append(cue)
+            if ass_milliseconds(end) <= ass_milliseconds(start):
+                issue("error", "ass_zero_duration", where, "Cue becomes zero-length at ASS centisecond precision; review its timing before export.")
         for language in ("en", "zh"):
             value = cue.get(language)
             text_check(value, f"{where}.{language}", require=include is True)
             if isinstance(value, str) and include is True:
+                capacity = style.get(f"dialogue_{language}_lines")
+                if cue.get("kind") in {"dialogue", "lyric"} and is_integer(capacity) and len(display_text(value).split("\n")) > capacity:
+                    issue("error", "dialogue_line_capacity", f"{where}.{language}", "Explicit lines exceed the fixed language band; rebreak the cue or increase the task-wide line capacity and rerender.")
                 limit = 64 if language == "en" else 32
                 if any(len(line) > limit for line in display_text(value).split("\n")):
                     issue("warning", "long_line", f"{where}.{language}", f"Line exceeds {limit} characters; rebreak against actual rendering.")
@@ -324,6 +355,11 @@ def lint_records(records):
         ids = item.get("cue_ids", [])
         if not isinstance(ids, list) or any(not isinstance(cid, str) or cid not in cue_ids for cid in ids):
             issue("error", "pending_cue_ids", f"{where}.cue_ids", "Each linked cue_id must exist in this records file.")
+    if not errors:
+        try:
+            dialogue_layout(records, included)
+        except SubtitleError as exc:
+            issue("error", "ass_layout", "style", str(exc))
     return {"tool_version": TOOL_VERSION, "schema_version": SCHEMA_VERSION, "errors": errors, "warnings": warnings,
             "counts": {"cues": len(cues), "included": len(included), "pending": len(pending), "sources": len(sources)},
             "verification_limit": "Structural/heuristic checks only; no audio, meaning, font availability, or visual verification."}
@@ -336,8 +372,13 @@ def srt_timestamp(milliseconds):
     return f"{hours:02d}:{minutes:02d}:{seconds:02d},{millis:03d}"
 
 
-def ass_timestamp(milliseconds, end=False):
-    centiseconds = (milliseconds + 9) // 10 if end else milliseconds // 10
+def ass_milliseconds(milliseconds):
+    # One mapping for both sides of every boundary prevents artificial overlap.
+    return ((milliseconds + 5) // 10) * 10
+
+
+def ass_timestamp(milliseconds):
+    centiseconds = ass_milliseconds(milliseconds) // 10
     hours, remainder = divmod(centiseconds, 360000)
     minutes, remainder = divmod(remainder, 6000)
     seconds, centis = divmod(remainder, 100)
@@ -391,10 +432,20 @@ def ass_escape(text):
     return text.replace("{", "\\{").replace("}", "\\}").replace("\n", "\\N")
 
 
+def effective_style(records):
+    return {**DEFAULT_STYLE, **records.get("style", {})}
+
+
+def style_digest(records):
+    payload = json.dumps(effective_style(records), ensure_ascii=False, sort_keys=True,
+                         separators=(",", ":"), allow_nan=False).encode("utf-8")
+    return sha256(payload)
+
+
 def scaled_style(records):
-    style = {**DEFAULT_STYLE, **records.get("style", {})}
+    style = effective_style(records)
     scale = records["video"]["height"] / 1080
-    for field in ("font_size_en", "font_size_zh", "font_size_onscreen", "outline", "margin_bottom"):
+    for field in ("font_size_en", "font_size_zh", "font_size_onscreen", "outline", "margin_bottom", "margin_top", "dialogue_gap"):
         style[field] *= scale
     return style
 
@@ -403,17 +454,54 @@ def number(value):
     return f"{value:.3f}".rstrip("0").rstrip(".")
 
 
+def dialogue_layout(records, cues):
+    """Reserve fixed language bands and keep each overlapping cue in one slot."""
+    video, style = records["video"], scaled_style(records)
+    en_height = style["font_size_en"] * style["dialogue_line_height"] * style["dialogue_en_lines"]
+    zh_height = style["font_size_zh"] * style["dialogue_line_height"] * style["dialogue_zh_lines"]
+    slot_height = en_height + zh_height + 2 * style["dialogue_gap"]
+    slot_ends, result = [], {}
+    for cue in sorted(cues, key=lambda item: (item["start_ms"], item["end_ms"], item["id"])):
+        if cue["kind"] == "onscreen":
+            continue
+        start, end = ass_milliseconds(cue["start_ms"]), ass_milliseconds(cue["end_ms"])
+        if end <= start:
+            raise SubtitleError(f"{cue['id']}: cue is zero-length at ASS precision.")
+        slot = next((index for index, old_end in enumerate(slot_ends) if old_end <= start), len(slot_ends))
+        if slot == len(slot_ends):
+            slot_ends.append(end)
+        else:
+            slot_ends[slot] = end
+        position = style["dialogue_position"]
+        if position == "top":
+            en_y = style["margin_top"] + en_height + slot * slot_height
+            zh_y = en_y + style["dialogue_gap"]
+        elif position == "middle":
+            band_height = en_height + style["dialogue_gap"] + zh_height
+            en_y = (video["height"] - band_height) / 2 + en_height - slot * slot_height
+            zh_y = en_y + style["dialogue_gap"]
+        else:
+            zh_y = video["height"] - style["margin_bottom"] - zh_height - slot * slot_height
+            en_y = zh_y - style["dialogue_gap"]
+        if en_y - en_height < 0 or zh_y + zh_height > video["height"]:
+            raise SubtitleError(f"{cue['id']}: fixed dialogue bands do not fit in the frame; review simultaneous speech, line capacities, fonts and margins.")
+        result[cue["id"]] = {"slot": slot, "x": round(video["width"] / 2),
+                              "en_y": round(en_y), "zh_y": round(zh_y)}
+    return result
+
+
 def render_ass(records, cues):
     video, style = records["video"], scaled_style(records)
     width, height = video["width"], video["height"]
     side = max(1, round(60 * height / 1080))
+    layout = dialogue_layout(records, cues)
     header = ["[Script Info]", "; Generated from records schema 1; verification statuses are not changed.",
               "ScriptType: v4.00+", f"PlayResX: {width}", f"PlayResY: {height}",
               "WrapStyle: 0", "ScaledBorderAndShadow: yes", "Collisions: Normal", "", "[V4+ Styles]",
               "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding"]
     definitions = [
         ("DialogueEnglish", style["font_en"], style["font_size_en"], 2, round(style["margin_bottom"])),
-        ("DialogueChinese", style["font_zh"], style["font_size_zh"], 2, round(style["margin_bottom"])),
+        ("DialogueChinese", style["font_zh"], style["font_size_zh"], 8, round(style["margin_bottom"])),
         ("OnscreenEnglish", style["font_en"], style["font_size_onscreen"], 8, round(height * .08)),
         ("OnscreenChinese", style["font_onscreen"], style["font_size_onscreen"], 8, round(height * .08)),
     ]
@@ -421,7 +509,7 @@ def render_ass(records, cues):
         header.append(f"Style: {name},{font},{number(size)},{style['color']},{style['color']},&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,{number(style['outline'])},0,{alignment},{side},{side},{margin},1")
     header += ["", "[Events]", "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text"]
     for cue in sorted(cues, key=lambda item: (item["start_ms"], item["end_ms"], item["id"])):
-        start, end = ass_timestamp(cue["start_ms"]), ass_timestamp(cue["end_ms"], end=True)
+        start, end = ass_timestamp(cue["start_ms"]), ass_timestamp(cue["end_ms"])
         margin_l = margin_r = margin_v = 0
         if cue["kind"] == "onscreen":
             info = cue.get("onscreen", {})
@@ -435,8 +523,12 @@ def render_ass(records, cues):
                 text = anchor + ass_escape(cue["en"]) + "\\N{\\rOnscreenChinese}" + ass_escape(cue["zh"])
             layer = 1
         else:
-            ass_style, layer = "DialogueEnglish", 0
-            text = ass_escape(cue["en"]) + "\\N{\\rDialogueChinese}" + ass_escape(cue["zh"])
+            position = layout[cue["id"]]
+            for language, ass_style, alignment in (("en", "DialogueEnglish", 2), ("zh", "DialogueChinese", 8)):
+                anchor = "{\\an" + str(alignment) + "\\pos(" + str(position["x"]) + "," + str(position[f"{language}_y"]) + ")}"
+                text = anchor + ass_escape(cue[language])
+                header.append(f"Dialogue: 0,{start},{end},{ass_style},,0,0,0,,{text}")
+            continue
         header.append(f"Dialogue: {layer},{start},{end},{ass_style},,{margin_l},{margin_r},{margin_v},,{text}")
     return "\n".join(header) + "\n"
 
@@ -489,12 +581,15 @@ def notes_text(records, report, events, pending_count, has_appendix):
     video = records["video"]
     included = [cue for cue in records["cues"] if cue.get("include", True)]
     lines = [f"# {video['basename']} 字幕说明", "", f"视频：{video['width']} × {video['height']}；时长 {srt_timestamp(video['duration_ms'])}。",
-             f"核实范围：{records['review_scope']}", "", f"导出记录 {len(included)} 条；SRT 在全部起止边界合并为 {len(events)} 个连续编号区间；ASS 保留每条记录。",
+             f"核实范围：{records['review_scope']}", "", f"导出记录 {len(included)} 条；SRT 在全部起止边界合并为 {len(events)} 个连续编号区间；ASS 按语言独立定位，事件数可不同。",
              f"待确认清单 {pending_count} 项；格式检查 {len(report['errors'])} 个错误、{len(report['warnings'])} 个提示。",
              "格式与编码检查仅检查记录及导出文本；不会替代实际听音、语义审校、字体可用性或画面核对。", "",
              "SRT 与 ASS 均为 UTF-8 BOM / CRLF。对白英文在上、简体中文在下；SRT 字体与样式取决于播放器。",
-             "ASS 字号、描边和底部边距按视频高度从 1080p 基准缩放，采用黑描边与底部安全区域；字体未随包提供，需实际渲染确认。",
-             "ASS 起止时间向外取整到百分之一秒，每个边界与记录相差不足 10 ms；SRT 保留毫秒。",
+             "ASS 对白/歌词每条导出英文、中文两个独立定位事件，画面文字每条一个事件；位置不随另一语言的行数变化。",
+             "ASS 字号、描边、边距和语言间距按视频高度从 1080p 基准缩放。默认每种语言预留两行，英文底边与中文顶边分别固定；实际字体行高和自动换行须渲染核对。",
+             f"所用字体：英文 {effective_style(records)['font_en']}；中文 {effective_style(records)['font_zh']}。1080p 基准字号：英文 {effective_style(records)['font_size_en']}；中文 {effective_style(records)['font_size_zh']}。位置：{effective_style(records)['dialogue_position']}。",
+             "同期对白使用独立固定槽位，每条在整个显示期间不换槽；底部/中部的额外槽位向上，顶部的额外槽位向下，需核对画面遮挡。字体未随包提供。",
+             "ASS 全部边界统一就近取整到百分之一秒，误差不超过 5 ms，相邻边界不会因取整制造重叠；SRT 保留毫秒。",
              "画面文字在 ASS 独立放置，SRT 使用【画面文字】标记并与同期对白合并；事件数量和排版可以不同。",
              "SRT 以 HTML 实体保护字面尖括号和 &；ASS 对字面花括号转义，并在原有反斜杠后插入零宽连接符以防控制码被执行。",
              ""]
@@ -621,6 +716,16 @@ def export_records(records_path, out, force=False):
     report = lint_records(records)
     if report["errors"]:
         raise SubtitleError("Export blocked by record errors:\n" + "\n".join(f"{item['at']}: {item['message']}" for item in report["errors"]))
+    if records.get("style_selection", {}).get("status") == "pending":
+        raise SubtitleError("Show the subtitle size/font/position previews and wait for the user's choice before final export.")
+    selection = records.get("style_selection", {})
+    if selection.get("status") == "confirmed":
+        preview_image = Path(selection["preview_image"])
+        if not preview_image.is_absolute():
+            preview_image = Path(records_path).parent / preview_image
+        reject_links(preview_image)
+        if not preview_image.is_file() or sha256(preview_image.read_bytes()) != selection["preview_sha256"]:
+            raise SubtitleError("The confirmed preview image is missing or changed; restore it or render a fresh selection before export.")
     cues = [cue for cue in records["cues"] if cue.get("include", True)]
     if not cues:
         raise SubtitleError("No included cues to export.")
@@ -628,6 +733,7 @@ def export_records(records_path, out, force=False):
     basename = records["video"]["basename"]
     pending, pending_count = pending_text(records)
     appendix = appendix_text(cues)
+    ass_count = sum(1 if cue["kind"] == "onscreen" else 2 for cue in cues)
     payloads = {
         f"{basename}.srt": subtitle_bytes(render_srt(events)),
         f"{basename}.ass": subtitle_bytes(render_ass(records, cues)),
@@ -636,13 +742,15 @@ def export_records(records_path, out, force=False):
     }
     if appendix:
         payloads[f"{basename}.画面文字全文.txt"] = subtitle_bytes(appendix)
-    if validate_srt(payloads[f"{basename}.srt"]) != len(events) or validate_ass(payloads[f"{basename}.ass"]) != len(cues):
+    if validate_srt(payloads[f"{basename}.srt"]) != len(events) or validate_ass(payloads[f"{basename}.ass"]) != ass_count:
         raise SubtitleError("Internal event count verification failed.")
     manifest = {"schema_version": SCHEMA_VERSION, "tool_version": TOOL_VERSION, "kind": "subtitle_export",
                 "video_id": records["video"]["id"], "basename": basename,
                 "records_sha256": sha256(Path(records_path).read_bytes()), "review_scope": records["review_scope"],
+                "style": effective_style(records), "style_sha256": style_digest(records),
                 "files": [{"path": name, "size": len(data), "sha256": sha256(data)} for name, data in payloads.items()],
-                "counts": {**report["counts"], "srt_events": len(events), "ass_events": len(cues), "pending_items": pending_count},
+                "counts": {**report["counts"], "srt_events": len(events), "ass_events": ass_count, "pending_items": pending_count},
+                "ass_dialogue_layout": dialogue_layout(records, cues),
                 "warnings": report["warnings"],
                 "srt_intervals": [{key: event[key] for key in ("start_ms", "end_ms", "cue_ids")} for event in events],
                 "verification_limit": report["verification_limit"]}

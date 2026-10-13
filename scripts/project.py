@@ -17,12 +17,15 @@ import tempfile
 from datetime import datetime, timezone
 import uuid
 
-VERSION = "1.0.0"
+VERSION = "1.01"
 STAGES = ("inspect", "references", "transcription", "translation", "timing", "visual", "qa", "delivery")
 STAGE_STATES = ("pending", "in_progress", "draft", "complete", "stale")
 DEFAULT_STYLE = {"font_en": "Arial", "font_zh": "Microsoft YaHei", "font_onscreen": "Microsoft YaHei",
                  "font_size_en": 42, "font_size_zh": 46, "font_size_onscreen": 40,
-                 "outline": 1.5, "margin_bottom": 60, "color": "&H00FFFFFF"}
+                 "outline": 1.5, "margin_bottom": 60, "color": "&H00FFFFFF",
+                 "dialogue_en_lines": 2, "dialogue_zh_lines": 2,
+                 "dialogue_line_height": 1.35, "dialogue_gap": 8,
+                 "dialogue_position": "bottom", "margin_top": 60}
 DIMENSIONS = {
     "media": ("english", "translation", "timing", "visual"),
     "english": ("english", "translation", "timing"),
@@ -186,7 +189,7 @@ def init(args):
                        "video": {"id": vid, "path": str(path), "basename": path.stem,
                                  "duration_ms": None, "width": None, "height": None, "fingerprint": fp},
                        "review_scope": "尚未进行听辨、翻译或画面核验。", "sources": [], "cues": [], "pending": [],
-                       "style": DEFAULT_STYLE.copy(), "history": []}
+                       "style": DEFAULT_STYLE.copy(), "style_selection": {"status": "pending"}, "history": []}
             relative = "records/" + vid + ".json"
             write(work / relative, records)
             videos.append({"id": vid, "path": str(path), "records": relative, "fingerprint": fp,
@@ -196,7 +199,7 @@ def init(args):
                     "config": {"language_original": "en", "language_translation": "zh-Hans",
                                "encoding": "utf-8-sig", "newline": "CRLF", "style": DEFAULT_STYLE.copy(),
                                "onscreen_mode": "chinese", "library_path": str(Path(args.library).resolve()) if args.library else str(default_library()),
-                               "decisions_revision": 1}, "glossary": [], "history": []}
+                               "decisions_revision": 4, "style_selection": {"status": "pending"}}, "glossary": [], "history": []}
         write(task_path, manifest)
     return {"project": str(task_path), "videos": [{"id": v["id"], "records": str(work / v["records"])} for v in videos]}
 

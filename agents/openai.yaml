@@ -1,4 +1,4 @@
 interface:
   display_name: "影视双语字幕制作与校对"
-  short_description: "按视频校对双语字幕，支持字体自选、画面文字翻译和持续积累的俚语库"
-  default_prompt: "使用 $bilingual-subtitles 为这些视频制作并校对中英双语字幕，保留待确认内容并打包交付。"
+  short_description: "先看效果图选择字幕字号、字体和位置，再校对双语字幕、画面文字并积累俚语"
+  default_prompt: "使用 $bilingual-subtitles，先展示字号、字体和位置效果图供我选择，再为这些视频制作并校对中英双语字幕，保留待确认内容并打包交付。"
