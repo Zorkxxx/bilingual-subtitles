@@ -17,7 +17,7 @@ import tempfile
 from datetime import datetime, timezone
 import uuid
 
-VERSION = "1.01"
+VERSION = "1.02"
 STAGES = ("inspect", "references", "transcription", "translation", "timing", "visual", "qa", "delivery")
 STAGE_STATES = ("pending", "in_progress", "draft", "complete", "stale")
 DEFAULT_STYLE = {"font_en": "Arial", "font_zh": "Microsoft YaHei", "font_onscreen": "Microsoft YaHei",
@@ -25,7 +25,8 @@ DEFAULT_STYLE = {"font_en": "Arial", "font_zh": "Microsoft YaHei", "font_onscree
                  "outline": 1.5, "margin_bottom": 60, "color": "&H00FFFFFF",
                  "dialogue_en_lines": 2, "dialogue_zh_lines": 2,
                  "dialogue_line_height": 1.35, "dialogue_gap": 8,
-                 "dialogue_position": "bottom", "margin_top": 60}
+                 "dialogue_position": "bottom", "margin_top": 60,
+                 "dialogue_align": "center", "margin_side": 60}
 DIMENSIONS = {
     "media": ("english", "translation", "timing", "visual"),
     "english": ("english", "translation", "timing"),
@@ -132,6 +133,11 @@ def validate_cues(records):
             raise ValueError(f"{cid}: invalid kind")
         if "include" in cue and type(cue["include"]) is not bool:
             raise ValueError(f"{cid}: include must be boolean")
+        if cue.get("include", True) is False and (
+                not isinstance(cue.get("exclusion_reason"), str) or not cue["exclusion_reason"].strip()
+                or not isinstance(cue.get("exclusion_evidence"), list)
+                or not any((isinstance(x, str) and bool(x.strip())) or (isinstance(x, dict) and bool(x)) for x in cue["exclusion_evidence"])):
+            raise ValueError(f"{cid}: excluded content requires a reason and review evidence")
         for key, state in cue.get("verification", {}).items():
             if key not in ("english", "translation", "timing", "visual") or not isinstance(state, dict):
                 raise ValueError(f"{cid}: invalid verification dimension")
@@ -146,6 +152,8 @@ def mark_cues(records, change, cue_ids=None):
     known = {c["id"] for c in records["cues"]}
     if selected - known:
         raise ValueError(f"Unknown cue IDs: {sorted(selected - known)}")
+    if change != "style" and isinstance(records.get("coverage"), dict):
+        records["coverage"].setdefault("review", {})["status"] = "pending"
     for cue in records["cues"]:
         if selected and cue["id"] not in selected:
             continue
@@ -189,7 +197,9 @@ def init(args):
                        "video": {"id": vid, "path": str(path), "basename": path.stem,
                                  "duration_ms": None, "width": None, "height": None, "fingerprint": fp},
                        "review_scope": "尚未进行听辨、翻译或画面核验。", "sources": [], "cues": [], "pending": [],
-                       "style": DEFAULT_STYLE.copy(), "style_selection": {"status": "pending"}, "history": []}
+                       "style": DEFAULT_STYLE.copy(), "style_selection": {"status": "pending"},
+                       "coverage": {"schema_version": 1, "items": [], "scans": [], "review": {"status": "pending", "evidence": []}},
+                       "history": []}
             relative = "records/" + vid + ".json"
             write(work / relative, records)
             videos.append({"id": vid, "path": str(path), "records": relative, "fingerprint": fp,
@@ -199,7 +209,7 @@ def init(args):
                     "config": {"language_original": "en", "language_translation": "zh-Hans",
                                "encoding": "utf-8-sig", "newline": "CRLF", "style": DEFAULT_STYLE.copy(),
                                "onscreen_mode": "chinese", "library_path": str(Path(args.library).resolve()) if args.library else str(default_library()),
-                               "decisions_revision": 4, "style_selection": {"status": "pending"}}, "glossary": [], "history": []}
+                               "decisions_revision": 5, "style_selection": {"status": "pending"}}, "glossary": [], "history": []}
         write(task_path, manifest)
     return {"project": str(task_path), "videos": [{"id": v["id"], "records": str(work / v["records"])} for v in videos]}
 
@@ -267,6 +277,13 @@ def mutate(args, operation):
             elif operation == "checkpoint":
                 if args.status == "complete" and not args.evidence:
                     raise ValueError("A complete stage requires --evidence describing what was actually checked")
+                if args.status == "complete" and args.stage in {"qa", "delivery"}:
+                    spec = importlib.util.spec_from_file_location("subtitle_export", Path(__file__).with_name("subtitles.py"))
+                    exporter = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(exporter)
+                    audit = exporter.lint_records(records)
+                    if audit["errors"] or not audit["coverage"]["ready"]:
+                        raise ValueError("Missing source items or unreviewed ranges remain; run coverage.py audit before completing qa/delivery")
                 parameters = load_json(args.parameters) if args.parameters else {}
                 artifacts = [fingerprint(p, True) for p in args.artifact]
                 video["stages"][args.stage] = {"status": args.status, "at": now(), "evidence": args.evidence,
@@ -301,7 +318,7 @@ def apply_patch(args):
         records = copy.deepcopy(original)
         cues = {c["id"]: c for c in records["cues"]}
         touched = set()
-        allowed = {"en", "zh", "start_ms", "end_ms", "include", "kind", "speaker", "verification", "unresolved", "onscreen", "slang_ids", "slang_refs", "evidence", "notes"}
+        allowed = {"en", "zh", "start_ms", "end_ms", "include", "kind", "speaker", "verification", "unresolved", "onscreen", "slang_ids", "slang_refs", "evidence", "notes", "exclusion_reason", "exclusion_evidence"}
         for edit in patch.get("edits", []):
             cid = edit["cue_id"]
             if cid not in cues or cid in touched:

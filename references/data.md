@@ -32,8 +32,9 @@ python scripts/project.py invalidate --work-dir <任务目录> --video-id <ID> -
   "video": {"id": "video-a", "path": "<输入视频路径>", "basename": "Example.S01E01", "duration_ms": 60000, "width": 1920, "height": 1080},
   "review_scope": "说明实际听辨/翻译/时间/画面检查范围。",
   "sources": [{"id": "ref-a", "title": "来源名称", "url": "<实际URL或本地出处>", "version_match": "开中末锚点已核/尚未核", "note": "版本差异"}],
-  "style": {"font_en": "Arial", "font_zh": "Microsoft YaHei", "font_onscreen": "Microsoft YaHei", "font_size_en": 42, "font_size_zh": 46, "font_size_onscreen": 40, "outline": 1.5, "margin_bottom": 60, "margin_top": 60, "dialogue_position": "bottom", "dialogue_en_lines": 2, "dialogue_zh_lines": 2, "dialogue_line_height": 1.35, "dialogue_gap": 8},
+  "style": {"font_en": "Arial", "font_zh": "Microsoft YaHei", "font_onscreen": "Microsoft YaHei", "font_size_en": 42, "font_size_zh": 46, "font_size_onscreen": 40, "outline": 1.5, "margin_bottom": 60, "margin_top": 60, "margin_side": 60, "dialogue_position": "bottom", "dialogue_align": "center", "dialogue_en_lines": 2, "dialogue_zh_lines": 2, "dialogue_line_height": 1.35, "dialogue_gap": 8},
   "style_selection": {"status": "pending"},
+  "coverage": {"schema_version": 1, "items": [], "expected_item_ids": [], "inventory_evidence": [], "scans": [], "review": {"status": "pending", "evidence": []}},
   "cues": [{
     "id": "audio-0007", "kind": "dialogue", "start_ms": 1200, "end_ms": 3400,
     "en": "<实际听辨原文>", "zh": "<对应译文>", "include": true,
@@ -50,13 +51,15 @@ python scripts/project.py invalidate --work-dir <任务目录> --video-id <ID> -
 }
 ```
 
-此结构示例只说明字段，不能把示例状态或文本当成已完成成果。cue ID 不随重新编号、译法或时码变化；SRT 序号仅在导出时生成。include=false 的条目仍保留排除理由与来源。kind 可为 dialogue/onscreen/lyric；对白 en 可承载实际外语原文，不能由中文回译伪造英语。
+此结构示例只说明字段，不能把示例状态或文本当成已完成成果。cue ID 不随重新编号、译法或时码变化；SRT 序号仅在导出时生成。include=false 的条目须保存非空 `exclusion_reason` 和 `exclusion_evidence`，保留来源与依据，不能静默过滤。kind 可为 dialogue/onscreen/lyric；对白 en 可承载实际外语原文，不能由中文回译伪造英语。
 
 四项 verification 各自为 pending/draft/verified/stale/not_applicable；verified 必须有非空证据，写明检查者/方式、位置与文件或来源。听辨证据和模型输出分别标识。画面字的 visual 表示识别原文是否核过，translation 表示译义；同时保存 onscreen 字段（见 visual.md）。pending 保存未产生 cue 的窗口，防止只报告现有字幕里的疑点。俚语调用时 `slang_ids` 保存稳定库条目 ID；另在 `slang_refs` 保存 `{id, revision, library_revision, sense}`，使纠正能够关联当时采用的版本。库条目的 usage_refs 保存该 records 路径、cue ID 和片源版本。
 
+`coverage` 是独立于成品 cues 的来源台账，嵌入 records.json，子 schema_version 为 1；`items` 保存原片/参考/识别候选及每项去向，`expected_item_ids` 冻结来源 ID 基准、`inventory_evidence` 保存候选收集依据，`scans` 分别保存音频与画面实际复查范围，`review` 保存内容复核状态和 basis_sha256，完整契约与 CLI 见 [coverage.md](coverage.md)。freeze/参考导入只扩展期待 ID，不删除旧基准；缺收集依据、旧 ID 消失或新项目未登记时不能完整导出。scope 缺省全片音频+画面，局部或关闭一种模态须有任务依据。空 items 或已冻结空清单都不表示原片没有内容，空 scans 表示尚未记录实际复查；pending 窗口不能替代 coverage 来源清单。旧记录缺少 coverage 时可做 lint 与显式草稿，不能自动由现有 cues 填成已完成台账。
+
 画面文字 `onscreen` 可含 full_en/full_zh、display_mode（缺省 chinese）、appendix、source_region、region。source_region 保存实际原文字区供核对，region 指字幕显示区域供 ASS 定位，两者均为归一化 `[x,y,w,h]`；具体判断见 visual.md。屏幕只显示中文时仍保存对应英文原文。
 
-style 的字号、描边、`margin_bottom`、`margin_top` 和 `dialogue_gap` 以 1080p 为基准，按视频高度缩放。上/下边距默认 60；`dialogue_position` 为 bottom/middle/top，默认 bottom，均水平居中。`dialogue_en_lines`、`dialogue_zh_lines` 是 1–8 的整数行容量，默认各 2；`dialogue_line_height` 是 1–3 的预留行高倍率，默认 1.35，三者均不缩放。语言间距 `dialogue_gap` 默认 8。这些字段用于对白/歌词的固定语言带与静态槽位，不根据每条 cue 的行数改变位置，也不会自动缩小字体。显式行数超容量由 lint 报错，自动换行的实际行数、字体行高及溢出须按 visual.md 真实渲染验收。
+style 的字号、描边、`margin_bottom`、`margin_top`、`margin_side` 和 `dialogue_gap` 以 1080p 为基准，按视频高度缩放。上下/侧边距默认 60；`dialogue_position` 为 bottom/middle/top，默认 bottom，`dialogue_align` 为 left/center/right，默认 center。`dialogue_en_lines`、`dialogue_zh_lines` 是 1–8 的整数行容量，默认各 2；`dialogue_line_height` 是 1–3 的预留行高倍率，默认 1.35，三者均不缩放。语言间距 `dialogue_gap` 默认 8。这些字段用于对白/歌词的固定语言带与静态槽位，不根据每条 cue 的行数改变位置，也不会自动缩小字体。显式行数超容量由 lint 报错，自动换行的实际行数、字体行高及溢出须按 visual.md 真实渲染验收。
 
 `style_selection.status` 为 pending/confirmed/waived。confirmed 保存 `confirmation`（用户实际答复）、`option_ids`（各组选项 ID）、`style_sha256`（完整有效、未缩放 style 的规范化摘要）、`preview_image`（综合效果图路径）与 `preview_sha256`（图片哈希）；预览清单另保存实际样例/帧与渲染条件。waived 仅在用户明确同意跳过预览时保存 confirmation 与 style_sha256，并记录原因。具体流程见 [style-selection.md](style-selection.md)。pending 不能最终导出；confirmed/waived 的 style_sha256 与当前有效 style 不符也不能导出。恢复任务核对摘要与图片哈希；摘要一致只证明配置和文件未变，不证明字体渲染、位置或内容已经验收。
 
@@ -76,4 +79,4 @@ python scripts/project.py apply-patch --records <单片JSON> --patch <修订JSON
 
 ## 迁移与版本
 
-1.01 仍只接收 schema_version=1，不自动猜测或降级未来 schema。旧记录缺少新增 style 字段时使用兼容默认值，缺少 style_selection 的旧记录可供脚本兼容读取；这不代表用户已经选择排版，开始新的制作/修复任务仍须执行效果图与选择流程。不要自动改写旧记录或覆盖旧字幕；重新导出后须重新完成视觉验收。版本更新流程见 decisions.md；持久俚语库不随 skill 安装/升级覆写。初版不把旧 Skins 字幕或未核的候选记忆冒充通用已核数据。
+1.02 仍只接收 records schema_version=1，coverage 子 schema 也为 1，不自动猜测或降级未来 schema。旧记录缺少新增 style 字段时使用兼容默认值，缺少 style_selection 时仍须执行效果图选择；缺少 coverage 时允许检查旧结构和保存草稿，但最终导出须从原片补建独立台账、实际复查并达到 ready，不能用现有 cues 自动伪造来源或证据。不要自动覆盖旧记录或字幕；重新导出后须重新完成视觉验收。版本更新流程见 decisions.md；持久俚语库不随 skill 安装/升级覆写。初版不把旧 Skins 字幕或未核的候选记忆冒充通用已核数据。

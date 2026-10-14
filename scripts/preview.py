@@ -11,6 +11,7 @@ import argparse
 import contextlib
 import copy
 from datetime import datetime, timezone
+import io
 import json
 import os
 from pathlib import Path
@@ -23,13 +24,15 @@ import tempfile
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import subtitles
+import fonts
 
-TOOL_VERSION = "1.01"
+TOOL_VERSION = "1.02"
 GROUP_FIELDS = {
     "size": {"font_size_en", "font_size_zh", "font_size_onscreen"},
     "font": {"font_en", "font_zh", "font_onscreen"},
     "position": {"dialogue_position", "margin_bottom", "margin_top", "dialogue_gap",
-                 "dialogue_en_lines", "dialogue_zh_lines", "dialogue_line_height"},
+                 "dialogue_en_lines", "dialogue_zh_lines", "dialogue_line_height",
+                 "dialogue_align", "margin_side"},
 }
 
 
@@ -116,6 +119,7 @@ def example(records):
 def sample_records(original, style, sample):
     data = copy.deepcopy(original)
     data.pop("style_selection", None)
+    data.pop("coverage", None)
     data["style"] = style
     # Preview has an artificial timeline; original cue timing/status is untouched.
     data["video"]["duration_ms"] = 2000
@@ -124,10 +128,158 @@ def sample_records(original, style, sample):
                      "verification": {name: {"status": "pending", "evidence": []}
                                       for name in ("english", "translation", "timing", "visual")}}]
     data["pending"] = []
-    report = subtitles.lint_records(data)
+    report = subtitles.lint_records(data, check_coverage=False)
     if report["errors"]:
         raise PreviewError("Invalid preview style/records: " + "; ".join(item["message"] for item in report["errors"]))
     return data, report["warnings"]
+
+
+def family_key(value):
+    return re.sub(r"[\s_-]", "", value.casefold())
+
+
+def font_inventory():
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        result = fonts.list_fonts(argparse.Namespace(dir=None, json=True))
+    inventory = json.loads(output.getvalue())
+    if result or not inventory.get("fonts"):
+        raise PreviewError("No accessible installed font inventory; inspect fonts.py list --json before choosing fonts.")
+    return inventory
+
+
+def candidate_faces(inventory, names, language):
+    """Keep the current family first, then real recommended families only."""
+    rows = []
+    used = set()
+    available = inventory["fonts"]
+    if language == "zh":
+        names = [*names, *sorted({item["family"] for item in available
+                                 if isinstance(item.get("family"), str)
+                                 and item["family"].startswith("Noto")
+                                 and any(marker in item["family"] for marker in ("CJK", "SC", "Hans"))})]
+    for preferred in names:
+        if not isinstance(preferred, str) or not preferred:
+            continue
+        matches = [item for item in available if any(
+            isinstance(alias, str) and family_key(alias) == family_key(preferred)
+            for alias in [item.get("family"), *item.get("family_names", [])])]
+        matches.sort(key=lambda item: (not any(word in (item.get("style") or "").casefold()
+                                              for word in ("regular", "normal", "roman", "book", "常规", "標準", "标准")),
+                                      str(item["path"]).casefold(), item["face"]))
+        if not matches:
+            continue
+        actual_family = matches[0].get("family") or preferred
+        if family_key(actual_family) in used:
+            continue
+        used.add(family_key(actual_family))
+        # Regular/default face is checked, so a bold-only glyph map cannot
+        # silently authorize a normal-weight family with different coverage.
+        rows.append({**matches[0], "family": actual_family})
+    return rows
+
+
+def covered_families(candidates, text, checks_dir, language):
+    text_path = checks_dir / f"{language}-sample.txt"
+    text_path.write_text(text, encoding="utf-8")
+    accepted, reports = [], []
+    for index, candidate in enumerate(candidates):
+        report_path = checks_dir / f"{language}-{index:02}.json"
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            result = fonts.check_font(argparse.Namespace(font=candidate["path"], face=candidate["face"],
+                                                         text=str(text_path), report=str(report_path)))
+        report = subtitles.read_json(report_path)
+        evidence = {"family": candidate["family"], "font_file": candidate["path"], "face": candidate["face"],
+                    "report": str(report_path), "sample_sha256": sha(text.encode("utf-8")),
+                    "all_covered": report.get("all_covered", False), "status": report.get("status"),
+                    "missing": report.get("missing", []), "error": report.get("error")}
+        reports.append(evidence)
+        if result == 0 and report.get("all_covered") is True:
+            accepted.append(evidence)
+    return accepted, reports
+
+
+def presets(args):
+    """Create editable choices from actual installed fonts, without selecting."""
+    records_path = Path(args.records).resolve(strict=True)
+    original_bytes = records_path.read_bytes()
+    original = load_records(records_path)
+    dimensions(original)
+    base, sample = full_style(original), example(original)
+    destination = Path(args.out).resolve()
+    if destination.suffix.lower() != ".json":
+        raise PreviewError("Preset output must be a separate .json options file.")
+    report_path = destination.with_name(destination.stem + ".font-checks.json")
+    for path in (destination, report_path):
+        subtitles.reject_links(path)
+        if path == records_path or path.exists():
+            raise PreviewError("Presets never overwrite records or existing options/font-check reports.")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    inventory = font_inventory()
+    checks_dir = Path(tempfile.mkdtemp(prefix=destination.stem + "-font-checks-", dir=destination.parent))
+    en_candidates = candidate_faces(inventory, [base["font_en"], "Arial", "Segoe UI", "Tahoma",
+                                                 "Georgia", "Consolas", "Times New Roman"], "en")
+    zh_candidates = candidate_faces(inventory, [base["font_zh"], "Microsoft YaHei", "SimHei", "SimSun",
+                                                 "DengXian", "KaiTi", "FangSong", "Noto Sans CJK SC", "Noto Sans SC"], "zh")
+    zh_text = sample["zh"] + "\n【示意背景，非实际片源】【字幕样式预览】"
+    english, en_reports = covered_families(en_candidates, sample["en"], checks_dir, "en")
+    chinese, zh_reports = covered_families(zh_candidates, zh_text, checks_dir, "zh")
+    onscreen, onscreen_reports = [], []
+    if family_key(base["font_onscreen"]) != family_key(base["font_zh"]):
+        candidates = candidate_faces(inventory, [base["font_onscreen"]], "onscreen")
+        onscreen, onscreen_reports = covered_families(candidates, zh_text, checks_dir, "onscreen")
+    font_report = {"tool_version": TOOL_VERSION, "records": str(records_path), "created_at": now(),
+                   "sample": sample, "inventory_directories": inventory["directories"],
+                   "inventory_errors": inventory["errors"], "english": en_reports, "chinese": zh_reports,
+                   "current_onscreen": onscreen_reports,
+                   "scope": "Installed-font inventory and sample cmap coverage; real FFmpeg font selection is still checked during render/select."}
+    subtitles.atomic_write(report_path, subtitles.json_bytes(font_report), force=False)
+    if not english or not chinese:
+        raise PreviewError(f"No sample-covering English/Chinese font combination is available; no options selected or installed. Inspect {report_path}.")
+    options = []
+    for code, en_size, zh_size in (("xs", 28, 32), ("s", 34, 38), ("m", 42, 46), ("l", 50, 54), ("xl", 58, 62)):
+        options.append({"id": "size-" + code, "label": f"{code.upper()}：英文 {en_size} / 中文 {zh_size}（1080p 基准）",
+                        "group": "size", "style": {"font_size_en": en_size, "font_size_zh": zh_size},
+                        "recommended": base["font_size_en"] == en_size and base["font_size_zh"] == zh_size})
+    seen_pairs = set()
+    for index in range(max(len(english), len(chinese))):
+        en, zh = english[index % len(english)], chinese[index % len(chinese)]
+        pair = (en["family"], zh["family"])
+        if pair in seen_pairs:
+            continue
+        seen_pairs.add(pair)
+        screen_font = onscreen[0] if len(seen_pairs) == 1 and onscreen else zh
+        label = f"英文 {en['family']} / 中文 {zh['family']}"
+        if screen_font["family"] != zh["family"]:
+            label += f" / 画面字 {screen_font['family']}"
+        options.append({"id": f"font-{len(seen_pairs):02}", "label": label,
+                        "group": "font", "style": {"font_en": en["family"], "font_zh": zh["family"],
+                                                     "font_onscreen": screen_font["family"]},
+                        "recommended": len(seen_pairs) == 1, "font_checks": {"en": en, "zh": zh, "onscreen": screen_font}})
+        if len(seen_pairs) == 6:
+            break
+    vertical_labels = {"top": "顶部", "middle": "中部", "bottom": "底部"}
+    horizontal_labels = {"left": "左对齐", "center": "居中", "right": "右对齐"}
+    for vertical in vertical_labels:
+        for horizontal in horizontal_labels:
+            options.append({"id": f"pos-{vertical}-{horizontal}",
+                            "label": vertical_labels[vertical] + " · " + horizontal_labels[horizontal], "group": "position",
+                            "style": {"dialogue_position": vertical, "dialogue_align": horizontal,
+                                      "margin_top": 60, "margin_bottom": 60, "margin_side": 60},
+                            "recommended": base["dialogue_position"] == vertical and base.get("dialogue_align", "center") == horizontal
+                                            and base["margin_bottom"] == 60 and base["margin_top"] == 60
+                                            and base.get("margin_side", 60) == 60})
+    options.append({"id": "pos-bottom-raised", "label": "底部偏高 · 居中（下边距 120）", "group": "position",
+                    "style": {"dialogue_position": "bottom", "dialogue_align": "center", "margin_bottom": 120,
+                              "margin_top": 60, "margin_side": 60},
+                    "recommended": base["dialogue_position"] == "bottom" and base.get("dialogue_align", "center") == "center"
+                                    and base["margin_bottom"] == 120})
+    if records_path.read_bytes() != original_bytes:
+        raise PreviewError("Records changed while preparing choices; no options file was committed.")
+    subtitles.atomic_write(destination, subtitles.json_bytes(options), force=False)
+    return {"options": str(destination), "font_checks": str(report_path), "counts": {"size": 5, "font": len(seen_pairs), "position": 10},
+            "records_modified": False, "selection_status": "pending",
+            "display_guidance": "按字号、字体、位置分组分轮展示效果图，可先显示推荐和少量候选；收到实际回复后再组合选择。可编辑选项或提供自定参数，不能自动采用推荐。"}
 
 
 def executable(path):
@@ -374,7 +526,7 @@ def select(args):
             # Validate the same style hash contract used by final export.
             check, _ = sample_records(updated, style, manifest["sample"])
             check["style_selection"] = updated["style_selection"]
-            errors = subtitles.lint_records(check)["errors"]
+            errors = subtitles.lint_records(check, check_coverage=False)["errors"]
             if errors:
                 raise PreviewError("Selection validation failed: " + "; ".join(item["message"] for item in errors))
             if records_path.read_bytes() != original_bytes:
@@ -396,6 +548,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--version", action="version", version=TOOL_VERSION)
     commands = parser.add_subparsers(dest="command", required=True)
+    command = commands.add_parser("presets", help="Generate editable size/font/position choices from actual installed fonts.")
+    command.add_argument("--records", required=True)
+    command.add_argument("--out", required=True)
+    command.set_defaults(run=presets)
     command = commands.add_parser("render", help="Render options without changing records; fonts must be checked first.")
     command.add_argument("--records", required=True)
     command.add_argument("--options", required=True)

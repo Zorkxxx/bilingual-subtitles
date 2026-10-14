@@ -1,10 +1,10 @@
 {
-  "skill_version": "1.01",
-  "released": "2026-10-13",
+  "skill_version": "1.02",
+  "released": "2026-10-15",
   "project_schema_version": 1,
   "records_schema_version": 1,
   "library_schema_version": 1,
-  "decisions_revision": 4,
+  "decisions_revision": 5,
   "changes": [
     {
       "version": "1.0.0",
@@ -28,6 +28,12 @@
       "version": "1.01",
       "date": "2026-10-13",
       "summary": "1.01 是用户指定的 GitHub 发布版本，包含此前 1.0.1 的 ASS 位置跳动修复和 1.1.0 的字号、字体与位置效果图选择流程；保留全部本地版本历史，数据 schema 不变。",
+      "decisions": "references/decisions.md"
+    },
+    {
+      "version": "1.02",
+      "date": "2026-10-15",
+      "summary": "防止整条对白和画面文字漏项：新增独立来源台账、音视频实际复查范围、候选去向及内容指纹对账；最终导出和 QA/交付完成必须通过检查，未完成稿明确标草稿并附漏项报告，排除内容必须保留原因与证据。提供 5 档字号、按实装字形覆盖筛选的更多字体组合，以及九宫格和底部偏高等 10 种固定字幕位置。",
       "decisions": "references/decisions.md"
     }
   ]

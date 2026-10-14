@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import html
+import importlib.util
 import json
 import math
 import os
@@ -23,7 +24,7 @@ import zipfile
 
 
 SCHEMA_VERSION = 1
-TOOL_VERSION = "1.01"
+TOOL_VERSION = "1.02"
 STATUSES = {"pending", "draft", "verified", "stale", "not_applicable"}
 DIMENSIONS = ("english", "translation", "timing", "visual")
 KINDS = {"dialogue", "onscreen", "lyric"}
@@ -35,6 +36,7 @@ DEFAULT_STYLE = {
     "dialogue_en_lines": 2, "dialogue_zh_lines": 2,
     "dialogue_line_height": 1.35, "dialogue_gap": 8,
     "dialogue_position": "bottom", "margin_top": 60,
+    "dialogue_align": "center", "margin_side": 60,
 }
 ALLOWED_DELIVERY_SUFFIXES = {".srt", ".ass", ".md", ".txt"}
 MOJIBAKE = re.compile(r"锟斤拷|鐨勬|涓|Ã[\x80-\xff]|â€|ä½|æ[\x80-\xbf]|\\u[0-9a-fA-F]{4}")
@@ -116,7 +118,20 @@ def evidence_present(value):
     )
 
 
-def lint_records(records):
+_COVERAGE_MODULE = None
+
+
+def coverage_module():
+    global _COVERAGE_MODULE
+    if _COVERAGE_MODULE is None:
+        spec = importlib.util.spec_from_file_location("subtitle_coverage", Path(__file__).with_name("coverage.py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _COVERAGE_MODULE = module
+    return _COVERAGE_MODULE
+
+
+def lint_records(records, check_coverage=True):
     """Return structural errors and heuristic warnings without modifying records."""
     errors, warnings = [], []
 
@@ -187,9 +202,9 @@ def lint_records(records):
         font = style[field]
         if not isinstance(font, str) or not font.strip() or re.search(r"[,{}\\\r\n\x00-\x1f\x7f]", font):
             issue("error", "unsafe_font", f"style.{field}", "Font family must be nonempty and cannot contain ASS delimiters or control characters.")
-    for field in ("font_size_en", "font_size_zh", "font_size_onscreen", "outline", "margin_bottom", "margin_top", "dialogue_gap"):
+    for field in ("font_size_en", "font_size_zh", "font_size_onscreen", "outline", "margin_bottom", "margin_top", "margin_side", "dialogue_gap"):
         number = style[field]
-        lower = 0 if field in {"outline", "margin_bottom", "margin_top", "dialogue_gap"} else 1
+        lower = 0 if field in {"outline", "margin_bottom", "margin_top", "margin_side", "dialogue_gap"} else 1
         if not is_number(number) or number < lower or number > 1080:
             issue("error", "style_number", f"style.{field}", f"Expected a finite 1080p-base number in [{lower}, 1080].")
         elif field.startswith("font_size") and number > 108:
@@ -203,6 +218,8 @@ def lint_records(records):
         issue("error", "dialogue_line_height", "style.dialogue_line_height", "Expected a font-height multiplier in [1, 3]; verify actual font metrics by rendering.")
     if not isinstance(style["dialogue_position"], str) or style["dialogue_position"] not in {"bottom", "middle", "top"}:
         issue("error", "dialogue_position", "style.dialogue_position", "Expected bottom, middle or top.")
+    if not isinstance(style["dialogue_align"], str) or style["dialogue_align"] not in {"left", "center", "right"}:
+        issue("error", "dialogue_align", "style.dialogue_align", "Expected left, center or right.")
     if not isinstance(style["color"], str) or not re.fullmatch(r"&H[0-9A-Fa-f]{8}", style["color"]):
         issue("error", "style_color", "style.color", "Expected ASS &HAABBGGRR, e.g. &H00FFFFFF.")
     selection = records.get("style_selection")
@@ -243,6 +260,11 @@ def lint_records(records):
         include = cue.get("include", True)
         if not isinstance(include, bool):
             issue("error", "include_type", f"{where}.include", "Expected a boolean.")
+        elif include is False:
+            if not isinstance(cue.get("exclusion_reason"), str) or not cue["exclusion_reason"].strip():
+                issue("error", "exclusion_reason", where, "Excluded subtitles must retain a specific reason; never silently drop dialogue or on-screen text.")
+            if not evidence_present(cue.get("exclusion_evidence")):
+                issue("error", "exclusion_evidence", where, "Excluded subtitles require review evidence for the exclusion.")
         if include is True:
             included.append(cue)
         start, end = cue.get("start_ms"), cue.get("end_ms")
@@ -360,7 +382,13 @@ def lint_records(records):
             dialogue_layout(records, included)
         except SubtitleError as exc:
             issue("error", "ass_layout", "style", str(exc))
+    coverage = None
+    if check_coverage and not errors:
+        coverage = coverage_module().audit_coverage(records)
+        errors.extend(coverage["errors"])
+        warnings.extend(coverage["issues"])
     return {"tool_version": TOOL_VERSION, "schema_version": SCHEMA_VERSION, "errors": errors, "warnings": warnings,
+            "coverage": coverage,
             "counts": {"cues": len(cues), "included": len(included), "pending": len(pending), "sources": len(sources)},
             "verification_limit": "Structural/heuristic checks only; no audio, meaning, font availability, or visual verification."}
 
@@ -445,7 +473,7 @@ def style_digest(records):
 def scaled_style(records):
     style = effective_style(records)
     scale = records["video"]["height"] / 1080
-    for field in ("font_size_en", "font_size_zh", "font_size_onscreen", "outline", "margin_bottom", "margin_top", "dialogue_gap"):
+    for field in ("font_size_en", "font_size_zh", "font_size_onscreen", "outline", "margin_bottom", "margin_top", "margin_side", "dialogue_gap"):
         style[field] *= scale
     return style
 
@@ -485,15 +513,20 @@ def dialogue_layout(records, cues):
             en_y = zh_y - style["dialogue_gap"]
         if en_y - en_height < 0 or zh_y + zh_height > video["height"]:
             raise SubtitleError(f"{cue['id']}: fixed dialogue bands do not fit in the frame; review simultaneous speech, line capacities, fonts and margins.")
-        result[cue["id"]] = {"slot": slot, "x": round(video["width"] / 2),
-                              "en_y": round(en_y), "zh_y": round(zh_y)}
+        alignment = style["dialogue_align"]
+        x = style["margin_side"] if alignment == "left" else video["width"] - style["margin_side"] if alignment == "right" else video["width"] / 2
+        if x < 0 or x > video["width"] or 2 * style["margin_side"] >= video["width"]:
+            raise SubtitleError(f"{cue['id']}: horizontal margins do not fit in the frame.")
+        en_alignment, zh_alignment = {"left": (1, 7), "center": (2, 8), "right": (3, 9)}[alignment]
+        result[cue["id"]] = {"slot": slot, "x": round(x), "en_y": round(en_y), "zh_y": round(zh_y),
+                              "en_alignment": en_alignment, "zh_alignment": zh_alignment}
     return result
 
 
 def render_ass(records, cues):
     video, style = records["video"], scaled_style(records)
     width, height = video["width"], video["height"]
-    side = max(1, round(60 * height / 1080))
+    side = max(1, round(style["margin_side"]))
     layout = dialogue_layout(records, cues)
     header = ["[Script Info]", "; Generated from records schema 1; verification statuses are not changed.",
               "ScriptType: v4.00+", f"PlayResX: {width}", f"PlayResY: {height}",
@@ -524,7 +557,8 @@ def render_ass(records, cues):
             layer = 1
         else:
             position = layout[cue["id"]]
-            for language, ass_style, alignment in (("en", "DialogueEnglish", 2), ("zh", "DialogueChinese", 8)):
+            for language, ass_style in (("en", "DialogueEnglish"), ("zh", "DialogueChinese")):
+                alignment = position[f"{language}_alignment"]
                 anchor = "{\\an" + str(alignment) + "\\pos(" + str(position["x"]) + "," + str(position[f"{language}_y"]) + ")}"
                 text = anchor + ass_escape(cue[language])
                 header.append(f"Dialogue: 0,{start},{end},{ass_style},,0,0,0,,{text}")
@@ -577,17 +611,20 @@ def appendix_text(cues):
     return "画面文字全文\n完整可辨认文字与译文保留如下；上屏内容可能按镜头可读时长分段。未辨认内容须以记录中的标记保留。\n\n" + "\n".join(sections)
 
 
-def notes_text(records, report, events, pending_count, has_appendix):
+def notes_text(records, report, events, pending_count, has_appendix, draft=False):
     video = records["video"]
     included = [cue for cue in records["cues"] if cue.get("include", True)]
-    lines = [f"# {video['basename']} 字幕说明", "", f"视频：{video['width']} × {video['height']}；时长 {srt_timestamp(video['duration_ms'])}。",
+    lines = [f"# {video['basename']} 字幕说明" + ("（未完成草稿）" if draft else ""), "",
+             "交付状态：未完成草稿，不能称为完整字幕或全片无漏项。" if draft else "交付状态：来源台账对账与所记录范围复查已完成；仍需按实际听辨、翻译和渲染依据验收。",
+             "漏项、排除依据和未复查范围见同名 .漏项检查.txt；程序不会发现尚未进入任何来源候选的内容。", "",
+             f"视频：{video['width']} × {video['height']}；时长 {srt_timestamp(video['duration_ms'])}。",
              f"核实范围：{records['review_scope']}", "", f"导出记录 {len(included)} 条；SRT 在全部起止边界合并为 {len(events)} 个连续编号区间；ASS 按语言独立定位，事件数可不同。",
              f"待确认清单 {pending_count} 项；格式检查 {len(report['errors'])} 个错误、{len(report['warnings'])} 个提示。",
              "格式与编码检查仅检查记录及导出文本；不会替代实际听音、语义审校、字体可用性或画面核对。", "",
              "SRT 与 ASS 均为 UTF-8 BOM / CRLF。对白英文在上、简体中文在下；SRT 字体与样式取决于播放器。",
              "ASS 对白/歌词每条导出英文、中文两个独立定位事件，画面文字每条一个事件；位置不随另一语言的行数变化。",
              "ASS 字号、描边、边距和语言间距按视频高度从 1080p 基准缩放。默认每种语言预留两行，英文底边与中文顶边分别固定；实际字体行高和自动换行须渲染核对。",
-             f"所用字体：英文 {effective_style(records)['font_en']}；中文 {effective_style(records)['font_zh']}。1080p 基准字号：英文 {effective_style(records)['font_size_en']}；中文 {effective_style(records)['font_size_zh']}。位置：{effective_style(records)['dialogue_position']}。",
+             f"所用字体：英文 {effective_style(records)['font_en']}；中文 {effective_style(records)['font_zh']}。1080p 基准字号：英文 {effective_style(records)['font_size_en']}；中文 {effective_style(records)['font_size_zh']}。位置：{effective_style(records)['dialogue_position']} / {effective_style(records)['dialogue_align']}。",
              "同期对白使用独立固定槽位，每条在整个显示期间不换槽；底部/中部的额外槽位向上，顶部的额外槽位向下，需核对画面遮挡。字体未随包提供。",
              "ASS 全部边界统一就近取整到百分之一秒，误差不超过 5 ms，相邻边界不会因取整制造重叠；SRT 保留毫秒。",
              "画面文字在 ASS 独立放置，SRT 使用【画面文字】标记并与同期对白合并；事件数量和排版可以不同。",
@@ -711,11 +748,14 @@ def atomic_write(path, data, force=False):
             temp_path.unlink(missing_ok=True)
 
 
-def export_records(records_path, out, force=False):
+def export_records(records_path, out, force=False, draft=False):
     records = read_json(records_path)
     report = lint_records(records)
     if report["errors"]:
         raise SubtitleError("Export blocked by record errors:\n" + "\n".join(f"{item['at']}: {item['message']}" for item in report["errors"]))
+    coverage = report["coverage"]
+    if not draft and not coverage["ready"]:
+        raise SubtitleError("Coverage is incomplete; run coverage.py audit to locate missing source items and unreviewed ranges. Use --draft only for explicitly unfinished progress.")
     if records.get("style_selection", {}).get("status") == "pending":
         raise SubtitleError("Show the subtitle size/font/position previews and wait for the user's choice before final export.")
     selection = records.get("style_selection", {})
@@ -730,15 +770,16 @@ def export_records(records_path, out, force=False):
     if not cues:
         raise SubtitleError("No included cues to export.")
     events = srt_events(cues)
-    basename = records["video"]["basename"]
+    basename = records["video"]["basename"] + (".草稿" if draft else "")
     pending, pending_count = pending_text(records)
     appendix = appendix_text(cues)
     ass_count = sum(1 if cue["kind"] == "onscreen" else 2 for cue in cues)
     payloads = {
         f"{basename}.srt": subtitle_bytes(render_srt(events)),
         f"{basename}.ass": subtitle_bytes(render_ass(records, cues)),
-        f"{basename}.说明.md": subtitle_bytes(notes_text(records, report, events, pending_count, bool(appendix))),
+        f"{basename}.说明.md": subtitle_bytes(notes_text(records, report, events, pending_count, bool(appendix), draft=draft)),
         f"{basename}.待确认事项.txt": subtitle_bytes(pending),
+        f"{basename}.漏项检查.txt": subtitle_bytes(coverage_module().report_text(records, coverage)),
     }
     if appendix:
         payloads[f"{basename}.画面文字全文.txt"] = subtitle_bytes(appendix)
@@ -746,6 +787,9 @@ def export_records(records_path, out, force=False):
         raise SubtitleError("Internal event count verification failed.")
     manifest = {"schema_version": SCHEMA_VERSION, "tool_version": TOOL_VERSION, "kind": "subtitle_export",
                 "video_id": records["video"]["id"], "basename": basename,
+                "source_basename": records["video"]["basename"], "export_mode": "draft" if draft else "final",
+                "coverage": {"ready": coverage["ready"], "summary": coverage["summary"],
+                             "basis_sha256": coverage_module().coverage_digest(records)},
                 "records_sha256": sha256(Path(records_path).read_bytes()), "review_scope": records["review_scope"],
                 "style": effective_style(records), "style_sha256": style_digest(records),
                 "files": [{"path": name, "size": len(data), "sha256": sha256(data)} for name, data in payloads.items()],
@@ -899,6 +943,7 @@ def main(argv=None):
     export.add_argument("records", type=Path)
     export.add_argument("--out", type=Path, required=True)
     export.add_argument("--force", action="store_true", help="Replace matching deliverable files; never changes source records.")
+    export.add_argument("--draft", action="store_true", help="Save explicitly unfinished subtitles with .草稿 filenames and a missing-item report; does not bypass structural or style checks.")
     package = sub.add_parser("package", help="ZIP only files explicitly selected by delivery manifests.")
     package.add_argument("--delivery", type=Path, required=True)
     package.add_argument("--zip", dest="zip_path", type=Path, required=True)
@@ -914,7 +959,7 @@ def main(argv=None):
             print(json.dumps(report, ensure_ascii=False, indent=2))
             return 1 if report["errors"] else 0
         if args.command == "export":
-            result = export_records(args.records, args.out, force=args.force)
+            result = export_records(args.records, args.out, force=args.force, draft=args.draft)
         else:
             result = package_delivery(args.delivery, args.zip_path, force=args.force)
         print(json.dumps(result, ensure_ascii=False, indent=2))
