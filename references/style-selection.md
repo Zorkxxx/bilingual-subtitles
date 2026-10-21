@@ -1,22 +1,22 @@
 # 效果图与字幕排版选择
 
-本流程用于未来的字幕制作、修复或排版任务，不在用户仅更新 skill 时发起字幕设置选择。先展示真实渲染的效果图，再取得选择；用户确认的配置用于最终 ASS。SRT 仍交付内容兼容版，但不能编码所选字体、字号或精确位置，不能承诺与效果图外观一致。
+本流程用于未来的字幕制作、修复或排版任务，不在用户仅更新 skill 时发起字幕设置选择。先展示真实渲染的效果图，再取得排版选择；这是样式确认，不是第一版字幕的内容验收，不因此发送初稿字幕或等待用户审阅第一稿。用户确认的配置用于最终 ASS；SRT 仍为内容兼容版，不能编码所选字体、字号或精确位置。
 
 ## 制作前展示三组选择
 
 媒体探测后取得视频分辨率和可用真实帧，枚举实际可用字体，检查样例字形覆盖及 ASS 渲染能力。选一帧和同一双语样例作为所有候选共同基准；正式字幕尚未制作时，只准备这条排版样例并说明用途，不把它当成已审校的全片成果。效果图必须由实际 ASS 渲染器生成，不能用 AI 造图或手绘字幕替代。
 
-提供字号、字体、位置三个独立组，按组分轮先展示图再询问，不把二十多个候选一次塞进同一个问题。每个选项给清楚的 ID、标签、具体值和效果图；每组只改变所比较的项目，其余设置保持一致，避免样例或背景变化干扰比较。用户可选择预设或直接自定参数。
+提供字号、字体、距底部距离三个独立组，按组分轮先展示图再询问，不把全部候选塞进同一个问题。新任务仅使用底部居中，不提供上下左右或中部的选择菜单。每个选项给清楚的 ID、标签、具体值和效果图；每组只改变所比较的项目，其余保持一致。用户可选择预设或直接自定参数。
 
 | 组 | 可用选项 | 显示与配置约定 |
 | --- | --- | --- |
 | 字号 size | XS：英文 28 / 中文 32；S：34 / 38；M：42 / 46（推荐）；L：50 / 54；XL：58 / 62 | 1080p 基准，按视频高度缩放；允许用户分别自定英文、中文字号。 |
 | 字体 font | 最多 6 个真实可用的英文/中文字体组合 | 真实枚举且样例字形覆盖通过；不足时少给，不虚构、不自动下载或安装。 |
-| 位置 position | top/middle/bottom × left/center/right 九宫格，另有 bottom 偏高 | bottom-center 推荐；偏高预设 margin_bottom=120，其余上下/侧边距默认 60，均为 1080p 基准。 |
+| 距底部距离 position | 40、60（推荐）、90、120、160，允许自定 | 均固定 bottom + center，仅改变 margin_bottom；数值为 1080p 基准，按视频高度缩放。 |
 
-字号选项也可按视频实际尺寸与阅读条件调整；推荐值不是自动选择。英文/中文字体、字号可分别指定，边距也可自定，必要时画面文字独立配置。`dialogue_position` 选择 top/middle/bottom，`dialogue_align` 选择 left/center/right，`margin_side` 控制左右安全边距。效果图保留固定语言带及相应水平锚点，英文固定底边、中文固定顶边；middle 使用固定双语带整体垂直居中，不能按每句行数改变位置。
+英文/中文字体、字号可分别指定，底边距也可自定，必要时画面文字独立配置。margin_bottom 表示固定中文预留语言带底边到画面底部的距离，实际值乘以 video.height/1080；字形下沿可能因行容量、字体留白而不同，不承诺每帧文字边缘恰好等于该像素数。效果图使用固定语言带、水平中心及英文底边/中文顶边锚点，不能按每句行数重算位置。旧记录中已明确选择的其他定位保留兼容，不擅自重置，也不为新任务增加旧方位菜单。
 
-先显示字号组效果图并询问，再显示字体组并询问，最后显示位置组并询问；位置多时可按纵向区域再比较横向对齐。可提前渲染全部候选，但按组展示和收集选择。允许直接回复选项 ID 或自定值，只询问未答项；记录实际答复及适用范围。等待选择期间可继续片源、音轨和参考素材检查，不能正式制作字幕或导出。没有回复、经过等待或会话结束均不授权默认值。
+先显示字号组效果图并询问，再显示字体组并询问，最后仅显示距底部距离组效果图并询问。可提前渲染全部候选，但按组展示和收集选择。允许直接回复选项 ID 或自定值，只询问未答项；记录实际答复及适用范围。等待选择期间可继续素材检查，不能正式制作字幕或导出。没有回复、经过等待或会话结束均不授权默认值；排版已确认后自主制作和复查，不再等待用户验收第一稿。
 
 ## 已知偏好、批次和恢复
 
@@ -34,19 +34,19 @@
 ```text
 python scripts/preview.py presets --records records.json --out options.json
 python scripts/preview.py render --records records.json --options options.json --out previews --ffmpeg <ffmpeg路径> --frame <实际视频帧PNG>
-python scripts/preview.py select --records records.json --manifest previews/preview-manifest.json --size size-m --font font-01 --position pos-bottom-center --confirmation <用户实际答复> --ffmpeg <ffmpeg路径>
+python scripts/preview.py select --records records.json --manifest previews/preview-manifest.json --size size-m --font font-01 --position pos-bottom-060 --confirmation <用户实际答复> --ffmpeg <ffmpeg路径>
 ```
 
-presets 的 `--out` 是明确 JSON 文件路径，输出 5 个字号、最多 6 个实际可用字体组合和 10 个位置。字号 ID 为 size-xs/size-s/size-m/size-l/size-xl，字体为 font-01..font-06（按当前环境可能更少），九宫格位置为 pos-top-left 等，偏高为 pos-bottom-raised。工具从实际字体库存取得候选并运行样例字形检查，同目录保存 `options.font-checks.json`；不能承诺每台机器都能给出同样字体或六组。样例覆盖不等于最终全部字幕字形覆盖，仍按 visual.md 检查实际文本与渲染日志。
+presets 的 `--out` 是明确 JSON 文件路径，输出 5 个字号、最多 6 个实际可用字体组合和 5 个底边距。字号 ID 为 size-xs/size-s/size-m/size-l/size-xl，字体为 font-01..font-06（按环境可能更少）；底边距 ID 为 pos-bottom-040/060/090/120/160，全部 bottom + center。工具从真实字体库存取得候选并运行样例字形检查，同目录保存 `options.font-checks.json`；不承诺每台机器有相同字体或六组。样例覆盖不等于最终全部字幕已检查，仍按 visual.md 核对实际文本与渲染日志。
 
-`options.json` 是 JSON 数组，每项为 `{id, label, group, style}`，group 为 size/font/position，style 是当前 style 的非空补丁，仅改变该组的字段。render 仍要求三组至少各一个选项；已确定组可在后续候选清单中保留单一选项，但单一候选不自动代表用户确认。用户已指定完整配置时每组只含对应值，用其实际指令作为 confirmation，不再问一次。`--frame` 接收实际视频帧图片路径；工具不核对它是否来自片源，调用者须留存源时间点。只有缺少可用真实帧时才省略此参数并明确标注抽象背景。
+`options.json` 是 JSON 数组，每项为 `{id, label, group, style}`，group 为 size/font/position，style 为该组非空补丁。新 position 选项仅允许 bottom、center 与 margin_bottom；自定义只填写 margin_bottom 时工具补齐 bottom/center，不接受其他方位菜单。render 仍要求三组至少各一个选项；已确定组可保留单一候选，但候选本身不代表用户确认。用户已指定完整配置时使用其实际指令作为 confirmation，不重问已答偏好。`--frame` 为实际视频帧路径，调用者留存来源时间点；仅缺真实帧时才省略并明确标注抽象背景。
 
 使用 presets 得到可运行候选数组；自定值可按下列片段增加选项。此片段仅显示部分组，不能原样运行，完整清单须保留实际可用的 font 组，以及 size/font/position 各至少一个选项。
 
 ```json
 [
   {"id": "size-custom", "label": "自定：英文40 / 中文44", "group": "size", "style": {"font_size_en": 40, "font_size_zh": 44}},
-  {"id": "pos-custom", "label": "顶部靠左，边距80", "group": "position", "style": {"dialogue_position": "top", "dialogue_align": "left", "margin_top": 80, "margin_side": 80}}
+  {"id": "pos-custom", "label": "自定距底部80", "group": "position", "style": {"margin_bottom": 80}}
 ]
 ```
 

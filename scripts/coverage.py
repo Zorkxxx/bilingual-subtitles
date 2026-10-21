@@ -17,7 +17,7 @@ import re
 import sys
 import tempfile
 
-VERSION = "1.02"
+VERSION = "1.03"
 KINDS = {"dialogue", "lyric", "onscreen"}
 REVIEW_CODES = {"coverage_review_pending", "coverage_review_stale", "coverage_review_evidence"}
 

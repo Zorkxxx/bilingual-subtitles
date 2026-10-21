@@ -1,6 +1,6 @@
 # 来源台账与漏项复核
 
-整条对白或画面文字没有进入 cues 时，格式检查无从发现。翻译前建立独立来源清单，翻译后及导出前核对每项去向，再按原片回听/回看疑似空白。台账必须来自原片实际内容和独立参考/识别候选，不能从本次成品 cues、SRT 或 ASS 反推；删 cue、过滤或合并不能同时删掉其来源候选以消除缺口。
+整条对白或画面文字没有进入 cues 时，格式检查无从发现。翻译前建立独立来源清单；初版内部保存后，自主逐段复听、复看原片寻找遗漏，核对每项去向，修补后再复查，不等待用户验收第一稿。台账来自原片实际内容和独立参考/识别候选，不能从本次成品 cues、SRT 或 ASS 反推；删 cue、过滤或合并不能同时删掉来源候选以消除缺口。
 
 ## 来源、去向与实际复查
 
@@ -16,7 +16,7 @@ scope 内每个已知候选必须保留下列去向之一：
 
 scans 分别记录原片音频与画面实际复查区间。reviewed 必须是 audio_review 或 visual_review，含实际方法、范围与证据；ASR、VAD、OCR、抽帧数量或参考覆盖率不能自动填成 reviewed。长片按块持续保存，回查拼接边界；即使确认没有应制字幕的内容，也要保存该段的实际复查依据。
 
-疑似空白须回听/回看，重点片头片尾、弱声和背景对白、同期说话、切片边缘、快速画面文字变化、复杂文件和长信。画面字候选见 [visual.md](visual.md)。缺少可听音频或原片画面时，保留可完成的文本/排版和准确未核范围，用显式草稿交付，不能补造扫描记录或证据。
+疑似空白须回听/回看，重点片头片尾、弱声和背景对白、同期说话、切片边缘、快速画面文字变化、复杂文件和长信。画面字候选见 [visual.md](visual.md)。初版后的实际复查记录轮次、字幕修订与范围；修补后更新对应核实证据，复查受影响区间和接缝，不能只重跑 audit。缺少可听音频或原片画面时，内部保留可完成内容与准确未核范围，明确最终未完成；不默认发送草稿，也不能补造扫描记录或证据。
 
 ## coverage 子结构
 
@@ -61,7 +61,9 @@ python scripts/coverage.py audit records.json --report coverage-report.json
 python scripts/coverage.py review --records records.json --evidence <实际原片复核的范围和依据>
 ```
 
-执行顺序为 init → 从原片音频/画面及独立参考收集候选 → freeze（参考导入自动登记）→ 映射/有据排除/保留待核 → 实际原片复查 → audit → review → audit 确认 ready → export。init 建空 items/scans、空冻结基准和 pending review，不自动从 cues 推断来源、标无内容或标已复查。import-srt 将实际参考 SRT 加为候选，记录 source-id、偏移、源路径与哈希，并登记全部来源 ID；不替代原片复听、翻译或最终映射。不要导入本次成品字幕来制造独立清单。items/scans 按实际工作编辑，保留稳定 ID、证据与修改历史，新增 items 后扩展冻结基准。
+执行顺序为 init → 独立来源收集 → freeze（参考导入自动登记）→ 制作内部初版并建立去向 → 自主逐段复听复看 → 修补、扩展来源基准并再次复查 → audit → 复核结束后 review → audit 与逐条核实条件通过 → 最终 export。发现新问题即回到修补和复查，不能把首版交付给用户作为继续条件。
+
+init 建空 items/scans、空冻结基准和 pending review，不自动从 cues 推断来源或标已复查。import-srt 将参考 SRT 加为候选，记录 source-id、偏移、源路径与哈希，并登记全部来源 ID；不替代原片复听、翻译或最终映射。不要导入本次成品字幕制造独立清单。items/scans 按实际工作编辑并保留历史，新增 items 后扩展冻结基准；coverage.review 在初版后自主复听复看及修补结束再调用，无需新增 postdraft 子结构。
 
 audit 不编辑 records，输出中文报告，`--report` 保存 JSON；退出码 ready 为 0、未完成为 1、结构异常为 2。报告 summary 包含 scope、full_video_dual_review、items_in_scope/items_out_of_scope、items_pending/items_mapped/items_excluded、expected_items、included_cues_in_scope/mapped_cues_in_scope 和 reviewed_ms（audio/visual）；正文保留完整候选、冻结依据、扫描记录、缺口及 review。计数不是内容完整性的证明。
 
@@ -69,4 +71,6 @@ audit 不编辑 records，输出中文报告，`--report` 保存 JSON；退出�
 
 init/import-srt/freeze/review 使用同目录原子写与 `.lock`，写入成功后 revision+1 并追加 history；重复导入相同参考可幂等返回，保留原有校准和状态。source-id 仅用英文字母、数字、下划线、点和连字符；参考文件内容改变时使用新的 source-id，不覆盖旧来源。并行修改先检查最新记录，不靠覆盖消除冲突。review 成功后再运行 audit，确认 ready 绑定当前内容。
 
-默认 `subtitles.py export` 要求 ready，scope 内未扫描段、未映射候选或复核失效不能完整交付。旧记录可 lint 与显式 `--draft` 保存草稿，但不能自动补造台账。草稿仅豁免覆盖就绪，结构、排版选择和预览哈希仍须有效；具体文件标记和交付规则见 [export.md](export.md)。ready 证明记录中的条件满足，不证明证据真实、全部原片内容已发现或译义正确；说明始终写实际核验范围。
+默认 `subtitles.py export` 和 qa/delivery complete 除 ready 外，还要求本次 scope 内启用模态的 included cues 适用 verification 为 verified、无未解决 unresolved，范围内 pending 已结。对白/歌词要求 english/translation/timing，画面字要求四维 verified；有据排除项不当作待翻译 cue，scope 外未核记录保留并报告。scope 内未扫描段、未映射候选或复核失效均不能最终交付。结构 lint 报告中的 final_review 列表及 warnings 提示逐条问题，不改变真实核实状态。
+
+旧记录可 lint，并在内部断点需要时用显式 `--draft` 保存工作文件，但不能自动补造台账；未经用户主动要求，不交付草稿文件或字幕包。草稿仍须结构、排版选择和预览哈希有效，不据此标完成。具体规则见 [export.md](export.md)。ready 不证明证据真实、全部原片内容已发现或译义正确，不能代替实际复听复看；能力缺口下保留内部成果并明确最终未完成。

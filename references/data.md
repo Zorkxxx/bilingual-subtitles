@@ -17,9 +17,11 @@ python scripts/project.py invalidate --work-dir <任务目录> --video-id <ID> -
 
 - schema_version=1；skill_version 独立于数据 schema，task_id 稳定，revision/history 留下操作。
 - videos 每项包含 id、path、records 相对路径、fingerprint 和 stages。
-- config 保存语言、编码、已确认的字体/字号/位置预设、画面字模式、持久 library_path 与 decisions_revision。config.style 的复用范围以用户确认为准。
+- config 保存语言、编码、已确认的字体/字号/底边距预设、画面字模式、持久 library_path 与 decisions_revision。config.style 的复用范围以用户确认为准。
 - glossary 保存本作品的名字、称呼和术语，不自动写入全局俚语库。
 - stages 为 inspect/references/transcription/translation/timing/visual/qa/delivery，各阶段 pending/in_progress/draft/complete/stale。complete 必须写实际证据，不能靠状态声称人工精听。
+
+draft 是内部工作状态，不是默认交付节点。第一版及各轮修补内部保存，不增加等待用户验收第一稿的阶段。qa/delivery complete 要求 coverage.ready，以及本次 scope 内启用模态的 included cues 适用核实维度 verified、无未解决 unresolved，pending 窗口已结；字段状态和程序通过不能代替真实复听复看。
 
 `status` 检查片源和阶段产物是否变化，以及 qa/delivery 是否针对旧 records revision；不自动刷新指纹或让失效成果变成有效。`checkpoint` 保存产物全文件哈希与工具参数。以 `invalidate` 管理依赖；直接手改 records 或更换工具参数时须主动标记相关阶段，第一版不自动监控文件或推断全部语义变化。
 
@@ -53,13 +55,23 @@ python scripts/project.py invalidate --work-dir <任务目录> --video-id <ID> -
 
 此结构示例只说明字段，不能把示例状态或文本当成已完成成果。cue ID 不随重新编号、译法或时码变化；SRT 序号仅在导出时生成。include=false 的条目须保存非空 `exclusion_reason` 和 `exclusion_evidence`，保留来源与依据，不能静默过滤。kind 可为 dialogue/onscreen/lyric；对白 en 可承载实际外语原文，不能由中文回译伪造英语。
 
-四项 verification 各自为 pending/draft/verified/stale/not_applicable；verified 必须有非空证据，写明检查者/方式、位置与文件或来源。听辨证据和模型输出分别标识。画面字的 visual 表示识别原文是否核过，translation 表示译义；同时保存 onscreen 字段（见 visual.md）。pending 保存未产生 cue 的窗口，防止只报告现有字幕里的疑点。俚语调用时 `slang_ids` 保存稳定库条目 ID；另在 `slang_refs` 保存 `{id, revision, library_revision, sense}`，使纠正能够关联当时采用的版本。库条目的 usage_refs 保存该 records 路径、cue ID 和片源版本。
+四项 verification 各自为 pending/draft/verified/stale/not_applicable；verified 必须有非空真实证据，写明检查者/方式、位置与来源。对白/歌词最终要求 english/translation/timing 已 verified，visual 不适用；画面文字四维均要求 verified。scope 外或有依据排除的条目继续保留真实状态和说明，不据此冒充全片已核。
 
-`coverage` 是独立于成品 cues 的来源台账，嵌入 records.json，子 schema_version 为 1；`items` 保存原片/参考/识别候选及每项去向，`expected_item_ids` 冻结来源 ID 基准、`inventory_evidence` 保存候选收集依据，`scans` 分别保存音频与画面实际复查范围，`review` 保存内容复核状态和 basis_sha256，完整契约与 CLI 见 [coverage.md](coverage.md)。freeze/参考导入只扩展期待 ID，不删除旧基准；缺收集依据、旧 ID 消失或新项目未登记时不能完整导出。scope 缺省全片音频+画面，局部或关闭一种模态须有任务依据。空 items 或已冻结空清单都不表示原片没有内容，空 scans 表示尚未记录实际复查；pending 窗口不能替代 coverage 来源清单。旧记录缺少 coverage 时可做 lint 与显式草稿，不能自动由现有 cues 填成已完成台账。
+unresolved 非空表示仍有未解决问题；pending 列表表示尚未结案窗口，不新增 resolved 字段。实际修复后从 pending 移出，并在 history 保留解决依据；不能为使导出通过而删除仍待核的记录。pending 的 audio/dialogue/lyric 属于音频，visual/onscreen/ocr 属于画面，其余类型结合 cue_ids 判断；本次 scope 内启用模态的未结问题阻止最终导出。听辨证据和模型输出分别标识，画面字同时保存 onscreen（见 visual.md）。
+
+范围判断采用正时长交集；单点 pending 按 scope 的 `[start_ms,end_ms)` 判断，scope 结束等于全片结尾时该影片终点也计入。未知模态且无关联 cue 时保守归入启用模态。scope 外记录和有依据排除项不误拦范围内最终交付，但保留在说明/待确认报告中。
+
+俚语调用时 slang_ids 保存稳定库条目 ID；slang_refs 保存 `{id, revision, library_revision, sense}` 使修订关联当时版本。库 usage_refs 保存 records 路径、cue ID 和片源版本。
+
+`coverage` 是独立来源台账，嵌入 records.json，子 schema_version 为 1；items 保存候选和去向，expected_item_ids/inventory_evidence 保存冻结基准与收集依据，scans 保存音频/画面实际复查范围，review 保存内容摘要。详见 [coverage.md](coverage.md)。freeze/参考导入只扩展基准，缺收集依据、旧 ID 消失或新项目未登记时不能最终导出。scope 缺省全片双模态，局部或关闭某模态须有任务依据。空清单或冻结空清单不能证明原片无内容，pending 窗口也不能替代来源清单。
+
+初版后自主逐段复听复看，修补再复查，记录轮次、字幕修订及实际范围；结束后再保存现有 coverage.review，不新增 postdraft 结构。旧记录缺少台账时可内部保存和 lint，但不能从成品 cues 补造来源或证据。能力缺口下内部保留成果并说明最终未完成；显式草稿仅内部断点或用户主动要求时使用，不默认发送链接或字幕包。
 
 画面文字 `onscreen` 可含 full_en/full_zh、display_mode（缺省 chinese）、appendix、source_region、region。source_region 保存实际原文字区供核对，region 指字幕显示区域供 ASS 定位，两者均为归一化 `[x,y,w,h]`；具体判断见 visual.md。屏幕只显示中文时仍保存对应英文原文。
 
-style 的字号、描边、`margin_bottom`、`margin_top`、`margin_side` 和 `dialogue_gap` 以 1080p 为基准，按视频高度缩放。上下/侧边距默认 60；`dialogue_position` 为 bottom/middle/top，默认 bottom，`dialogue_align` 为 left/center/right，默认 center。`dialogue_en_lines`、`dialogue_zh_lines` 是 1–8 的整数行容量，默认各 2；`dialogue_line_height` 是 1–3 的预留行高倍率，默认 1.35，三者均不缩放。语言间距 `dialogue_gap` 默认 8。这些字段用于对白/歌词的固定语言带与静态槽位，不根据每条 cue 的行数改变位置，也不会自动缩小字体。显式行数超容量由 lint 报错，自动换行的实际行数、字体行高及溢出须按 visual.md 真实渲染验收。
+style 的字号、描边、边距和 dialogue_gap 以 1080p 为基准，按 video.height/1080 缩放。新任务固定 dialogue_position=bottom、dialogue_align=center，位置只选择 margin_bottom：40/60（推荐）/90/120/160 或自定值。margin_bottom 是固定中文预留语言带底边到画面底部的距离；字体留白和行容量会影响实际字形下沿，不承诺文字边缘恰好相距该像素数。旧已确认记录的其他定位字段继续按原值兼容，不新增方位菜单，也不擅改明确偏好。
+
+dialogue_en_lines/dialogue_zh_lines 为 1–8 整数容量，默认各 2；dialogue_line_height 为 1–3 倍率，默认 1.35；三者不缩放。dialogue_gap 默认 8。语言带与静态槽位不随每句行数改变位置，也不自动缩小字号；显式行数超容量由 lint 报错，真实自动换行、字体行高和溢出按 visual.md 渲染验收。
 
 `style_selection.status` 为 pending/confirmed/waived。confirmed 保存 `confirmation`（用户实际答复）、`option_ids`（各组选项 ID）、`style_sha256`（完整有效、未缩放 style 的规范化摘要）、`preview_image`（综合效果图路径）与 `preview_sha256`（图片哈希）；预览清单另保存实际样例/帧与渲染条件。waived 仅在用户明确同意跳过预览时保存 confirmation 与 style_sha256，并记录原因。具体流程见 [style-selection.md](style-selection.md)。pending 不能最终导出；confirmed/waived 的 style_sha256 与当前有效 style 不符也不能导出。恢复任务核对摘要与图片哈希；摘要一致只证明配置和文件未变，不证明字体渲染、位置或内容已经验收。
 
@@ -79,4 +91,4 @@ python scripts/project.py apply-patch --records <单片JSON> --patch <修订JSON
 
 ## 迁移与版本
 
-1.02 仍只接收 records schema_version=1，coverage 子 schema 也为 1，不自动猜测或降级未来 schema。旧记录缺少新增 style 字段时使用兼容默认值，缺少 style_selection 时仍须执行效果图选择；缺少 coverage 时允许检查旧结构和保存草稿，但最终导出须从原片补建独立台账、实际复查并达到 ready，不能用现有 cues 自动伪造来源或证据。不要自动覆盖旧记录或字幕；重新导出后须重新完成视觉验收。版本更新流程见 decisions.md；持久俚语库不随 skill 安装/升级覆写。初版不把旧 Skins 字幕或未核的候选记忆冒充通用已核数据。
+1.03 的 records 与 coverage 子 schema 均保持 1，不猜测或降级未来 schema。缺 style_selection 的旧任务仍按排版流程处理已知偏好和缺项；缺 coverage 时先内部保留旧结构，从原片补建独立来源并在初版后自主复听复看。最终导出同时满足覆盖、逐条核实及排版条件；显式草稿仅作内部断点或应用户主动要求提供，不能默认交付或伪装完成。不自动覆盖旧记录、字幕、审校依据或俚语库；版本更新与历史见 decisions.md。

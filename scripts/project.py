@@ -17,7 +17,7 @@ import tempfile
 from datetime import datetime, timezone
 import uuid
 
-VERSION = "1.02"
+VERSION = "1.03"
 STAGES = ("inspect", "references", "transcription", "translation", "timing", "visual", "qa", "delivery")
 STAGE_STATES = ("pending", "in_progress", "draft", "complete", "stale")
 DEFAULT_STYLE = {"font_en": "Arial", "font_zh": "Microsoft YaHei", "font_onscreen": "Microsoft YaHei",
@@ -198,7 +198,7 @@ def init(args):
                                  "duration_ms": None, "width": None, "height": None, "fingerprint": fp},
                        "review_scope": "尚未进行听辨、翻译或画面核验。", "sources": [], "cues": [], "pending": [],
                        "style": DEFAULT_STYLE.copy(), "style_selection": {"status": "pending"},
-                       "coverage": {"schema_version": 1, "items": [], "scans": [], "review": {"status": "pending", "evidence": []}},
+                       "coverage": {"schema_version": 1, "items": [], "expected_item_ids": [], "inventory_evidence": [], "scans": [], "review": {"status": "pending", "evidence": []}},
                        "history": []}
             relative = "records/" + vid + ".json"
             write(work / relative, records)
@@ -209,7 +209,7 @@ def init(args):
                     "config": {"language_original": "en", "language_translation": "zh-Hans",
                                "encoding": "utf-8-sig", "newline": "CRLF", "style": DEFAULT_STYLE.copy(),
                                "onscreen_mode": "chinese", "library_path": str(Path(args.library).resolve()) if args.library else str(default_library()),
-                               "decisions_revision": 5, "style_selection": {"status": "pending"}}, "glossary": [], "history": []}
+                               "decisions_revision": 6, "style_selection": {"status": "pending"}}, "glossary": [], "history": []}
         write(task_path, manifest)
     return {"project": str(task_path), "videos": [{"id": v["id"], "records": str(work / v["records"])} for v in videos]}
 
@@ -284,6 +284,9 @@ def mutate(args, operation):
                     audit = exporter.lint_records(records)
                     if audit["errors"] or not audit["coverage"]["ready"]:
                         raise ValueError("Missing source items or unreviewed ranges remain; run coverage.py audit before completing qa/delivery")
+                    if audit["final_review"]:
+                        raise ValueError("Final review is incomplete; resolve in-scope cue verification and pending windows before completing qa/delivery:\n" +
+                                         "\n".join(f"{item['at']}: {item['message']}" for item in audit["final_review"]))
                 parameters = load_json(args.parameters) if args.parameters else {}
                 artifacts = [fingerprint(p, True) for p in args.artifact]
                 video["stages"][args.stage] = {"status": args.status, "at": now(), "evidence": args.evidence,

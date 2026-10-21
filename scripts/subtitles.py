@@ -24,7 +24,7 @@ import zipfile
 
 
 SCHEMA_VERSION = 1
-TOOL_VERSION = "1.02"
+TOOL_VERSION = "1.03"
 STATUSES = {"pending", "draft", "verified", "stale", "not_applicable"}
 DIMENSIONS = ("english", "translation", "timing", "visual")
 KINDS = {"dialogue", "onscreen", "lyric"}
@@ -129,6 +129,69 @@ def coverage_module():
         spec.loader.exec_module(module)
         _COVERAGE_MODULE = module
     return _COVERAGE_MODULE
+
+
+def final_review_issues(records):
+    """Unfinished work in the explicit task scope; call after structural lint.
+
+    Pending windows have no resolved flag: move a repaired item out of pending
+    and preserve its resolution in task history. This never verifies evidence.
+    """
+    issues = []
+    duration = records.get("video", {}).get("duration_ms")
+    cov = records.get("coverage", {})
+    scope = cov.get("scope") if isinstance(cov, dict) else None
+    if scope is None:
+        scope = {"start_ms": 0, "end_ms": duration, "audio": True, "visual": True}
+    if (not isinstance(scope, dict) or not is_integer(duration) or duration <= 0
+            or not is_integer(scope.get("start_ms")) or not is_integer(scope.get("end_ms"))
+            or not 0 <= scope["start_ms"] < scope["end_ms"] <= duration
+            or any(type(scope.get(k)) is not bool for k in ("audio", "visual"))
+            or not (scope["audio"] or scope["visual"])):
+        return [{"code": "final_review_scope", "at": "coverage.scope", "message": "Cannot determine a valid final-review scope; fix structural errors first."}]
+
+    def modality(kind):
+        if kind in {"visual", "onscreen", "ocr"}:
+            return {"visual"}
+        if kind in {"audio", "dialogue", "lyric"}:
+            return {"audio"}
+        return set()
+
+    def in_scope(item, modalities):
+        if not any(scope[k] for k in modalities):
+            return False
+        a, b = item["start_ms"], item["end_ms"]
+        if a == b:
+            return scope["start_ms"] <= a < scope["end_ms"] or a == scope["end_ms"] == duration
+        return max(a, scope["start_ms"]) < min(b, scope["end_ms"])
+
+    def add(code, where, item, message):
+        issues.append({"code": code, "at": where, "message": message,
+                       "start_ms": item["start_ms"], "end_ms": item["end_ms"]})
+
+    cues = records.get("cues", [])
+    by_id = {cue["id"]: cue for cue in cues}
+    for index, cue in enumerate(cues):
+        if not cue.get("include", True) or not in_scope(cue, modality(cue["kind"])):
+            continue
+        where = f"cues[{index}]"
+        for dimension in applicable_dimensions(cue):
+            state = status_of(cue, dimension)
+            if state != "verified":
+                add("final_review_unverified", f"{where}.verification.{dimension}", cue,
+                    f"{cue['id']}: {dimension}={state}; finish the actual review and record evidence before final delivery.")
+        if cue.get("unresolved"):
+            add("final_review_unresolved", where + ".unresolved", cue,
+                f"{cue['id']}: unresolved notes remain; repair them and preserve the resolution before final delivery.")
+    for index, item in enumerate(records.get("pending", [])):
+        modalities = modality(item["kind"])
+        if not modalities:
+            for cid in item.get("cue_ids", []):
+                modalities.update(modality(by_id[cid]["kind"]))
+        if in_scope(item, modalities or {"audio", "visual"}):
+            add("final_review_pending", f"pending[{index}]", item,
+                f"{item['id']}: an unfinished task window remains in scope: {item['note']}")
+    return issues
 
 
 def lint_records(records, check_coverage=True):
@@ -387,7 +450,10 @@ def lint_records(records, check_coverage=True):
         coverage = coverage_module().audit_coverage(records)
         errors.extend(coverage["errors"])
         warnings.extend(coverage["issues"])
+    final_review = final_review_issues(records) if not errors else []
+    warnings.extend(final_review)
     return {"tool_version": TOOL_VERSION, "schema_version": SCHEMA_VERSION, "errors": errors, "warnings": warnings,
+            "final_review": final_review,
             "coverage": coverage,
             "counts": {"cues": len(cues), "included": len(included), "pending": len(pending), "sources": len(sources)},
             "verification_limit": "Structural/heuristic checks only; no audio, meaning, font availability, or visual verification."}
@@ -615,7 +681,8 @@ def notes_text(records, report, events, pending_count, has_appendix, draft=False
     video = records["video"]
     included = [cue for cue in records["cues"] if cue.get("include", True)]
     lines = [f"# {video['basename']} 字幕说明" + ("（未完成草稿）" if draft else ""), "",
-             "交付状态：未完成草稿，不能称为完整字幕或全片无漏项。" if draft else "交付状态：来源台账对账与所记录范围复查已完成；仍需按实际听辨、翻译和渲染依据验收。",
+             "交付状态：内部未完成进度，默认不向用户交付；不能称为完整字幕或全片无漏项。" if draft else "交付状态：本次范围的来源对账、记录的原片复查与逐条内容核实已完成；实际音画及渲染验收仍以保存的真实依据为准。",
+             "本状态只针对 coverage.scope 的时段和模态；范围外、被排除条目的状态仍完整列在待确认清单，不代表全片均已核实。",
              "漏项、排除依据和未复查范围见同名 .漏项检查.txt；程序不会发现尚未进入任何来源候选的内容。", "",
              f"视频：{video['width']} × {video['height']}；时长 {srt_timestamp(video['duration_ms'])}。",
              f"核实范围：{records['review_scope']}", "", f"导出记录 {len(included)} 条；SRT 在全部起止边界合并为 {len(events)} 个连续编号区间；ASS 按语言独立定位，事件数可不同。",
@@ -756,6 +823,9 @@ def export_records(records_path, out, force=False, draft=False):
     coverage = report["coverage"]
     if not draft and not coverage["ready"]:
         raise SubtitleError("Coverage is incomplete; run coverage.py audit to locate missing source items and unreviewed ranges. Use --draft only for explicitly unfinished progress.")
+    if not draft and report["final_review"]:
+        raise SubtitleError("Final review is incomplete; finish the in-scope content review before final delivery:\n" +
+                            "\n".join(f"{item['at']}: {item['message']}" for item in report["final_review"]))
     if records.get("style_selection", {}).get("status") == "pending":
         raise SubtitleError("Show the subtitle size/font/position previews and wait for the user's choice before final export.")
     selection = records.get("style_selection", {})
@@ -943,7 +1013,7 @@ def main(argv=None):
     export.add_argument("records", type=Path)
     export.add_argument("--out", type=Path, required=True)
     export.add_argument("--force", action="store_true", help="Replace matching deliverable files; never changes source records.")
-    export.add_argument("--draft", action="store_true", help="Save explicitly unfinished subtitles with .草稿 filenames and a missing-item report; does not bypass structural or style checks.")
+    export.add_argument("--draft", action="store_true", help="Save internal unfinished progress with .草稿 filenames and review reports; not a default user deliverable and never bypasses structural or style checks.")
     package = sub.add_parser("package", help="ZIP only files explicitly selected by delivery manifests.")
     package.add_argument("--delivery", type=Path, required=True)
     package.add_argument("--zip", dest="zip_path", type=Path, required=True)

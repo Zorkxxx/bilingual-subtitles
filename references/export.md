@@ -2,17 +2,28 @@
 
 `scripts/subtitles.py` 仅使用 Python 3.10+ 标准库。它处理已保存的字幕记录，不负责听音、翻译、OCR、自动校时、字体安装或画面验收。格式通过不代表台词、译文或时间轴已经按视频核实；所有输入核实状态保持原样。
 
+第一版仅内部保存，自主逐段复听复看、查漏修补并重新复查后才准备最终交付；不发送初稿字幕链接或字幕包，不等待用户验收第一稿。制作前用于选择样式的效果图仍须展示并取得选择，不能将它与内容初稿交付混同。
+
 ```text
 python scripts/subtitles.py lint records.json --report lint-report.json
 python scripts/coverage.py audit records.json --report coverage-report.json
 python scripts/subtitles.py export records.json --out delivery
-python scripts/subtitles.py export records.json --out draft-delivery --draft
 python scripts/subtitles.py package --delivery delivery --zip subtitles.zip
 ```
 
-`lint` 有错误时返回非零；`export` 在写文件前先阻止结构错误。默认最终导出还要求 `coverage.py audit` 的 ready 为 true：scope 内候选有去向、音频/画面实际复查范围无缺口，review 已 complete 且 basis_sha256 匹配当前内容。详见 [coverage.md](coverage.md)。旧数据缺清单、候选待核、未扫描段或内容复核失效时，仅可显式 `--draft` 保存未完成稿。
+`lint` 有错误时返回非零；`export` 在写文件前先阻止结构错误。最终导出和 qa/delivery complete 除 coverage.ready 外，还要求本次 scope 内启用模态的 included cues 适用核实状态全部 verified、unresolved 已结，范围内 pending 窗口已解决。对白/歌词要求 english/translation/timing，画面文字四维均要求 verified。有依据排除项及 scope 外未核内容不误拦本次范围的最终交付，但仍如实报告，不能因此声称全片已核。
 
-`--draft` 只豁免 coverage.ready，结构错误及排版确认/哈希检查仍阻断。`style_selection.status` 为 `pending` 时不能导出；为 `confirmed` 时，当前完整有效 style 的摘要必须等于 `style_sha256`，并保留 `confirmation`、`preview_image` 和 `preview_sha256`。`waived` 仅用于用户明确跳过预览，仍须实际答复和匹配的 style_sha256，不能以未回复设置此状态。修改配置后重新渲染并更新对应记录，不能以草稿模式绕过已选外观契约。
+coverage.ready 要求候选去向、实际复查范围、complete review 及 basis_sha256 均有效；review 在内部初版后自主复听复看、修补及复查结束再保存。lint 的 final_review 列表提示逐条未核问题，结构 lint 通过不代表最终条件满足。详见 [coverage.md](coverage.md)。旧数据缺清单、候选待核、未扫描段、核实不足或摘要失效时，继续内部修补；不能默认改成草稿交付。
+
+仅内部断点或内部渲染需要时，可显式保存未完成工作文件：
+
+```text
+python scripts/subtitles.py export records.json --out internal-review --draft
+```
+
+此目录和链接不默认发给用户，不打包为途中交付；只有用户主动要求草稿时才可提供明确标记的未完成内容。缺少真实音画访问时内部保留成果并说明最终未完成及具体缺口，不伪造核实证据。
+
+`--draft` 允许覆盖或逐条核实尚未就绪的内部进度，结构错误及排版确认/哈希检查仍阻断。`style_selection.status` 为 pending 时不能导出；confirmed 时完整有效 style 摘要必须匹配 style_sha256，并保留 confirmation、preview_image、preview_sha256。waived 只用于用户明确跳过预览，仍须实际答复和匹配摘要，不能以未回复设置。修改配置后重新渲染并保存对应记录，不能以草稿模式绕过已选外观契约。
 
 导出和打包默认拒绝覆盖，明确需要替换已有结果时使用 `--force`。`lint --report` 可以替换报告，不能替换输入记录。输出文件逐个原子提交，导出白名单最后提交；意外中断可能留下部分新文件，打包会因缺文件或哈希不符而停止，核对后重新导出。不要把输出目录设为知识库目录。
 
@@ -20,7 +31,9 @@ python scripts/subtitles.py package --delivery delivery --zip subtitles.zip
 
 使用 [data.md](data.md) 中的 `schema_version: 1` 记录。视频 `basename` 是原视频文件名去掉最后扩展名后的 stem，不含目录。`video.duration_ms/width/height` 必须取实际视频信息，不能仅从发布名猜测。保留稳定的 cue ID，而非用每次导出改变的 SRT 序号关联修订。
 
-所有字号、描边、`margin_bottom`、`margin_top`、`margin_side` 和 `dialogue_gap` 是 **1080p 基准单位**，无论值是显式填写还是缺省，导出时都乘以 `video.height / 1080`。推荐英文 Arial 42、中文 Microsoft YaHei 46、画面文字 Microsoft YaHei 40、描边 1.5、上下/侧边距 60、语言间距 8、白色 `&H00FFFFFF`，须先检查字体实际可用；最终值读取用户确认的 records.style。`dialogue_position` 为 bottom/middle/top，默认 bottom；`dialogue_align` 为 left/center/right，默认 center，组合为九宫格位置。`dialogue_en_lines`、`dialogue_zh_lines` 默认各为 2，取 1–8 的整数；`dialogue_line_height` 默认 1.35，取 1–3 的行高倍率。这三个值不随分辨率缩放。用户选择的字体必须在目标渲染环境真实可用并覆盖所有字符；脚本仅检查字段，不证明字体或字形可用。字体族名不能包含逗号、花括号、反斜杠或控制字符，这些是 ASS 字段/标签分隔符。英文、中文和画面字可分别指定字体。
+所有字号、描边、边距和 `dialogue_gap` 都是 **1080p 基准单位**，导出时乘以 video.height/1080。新任务固定底部居中，仅选择 margin_bottom：40、60（推荐）、90、120、160 或自定值。它表示固定中文预留语言带底边到画面底部的距离，不承诺实际字形下沿每帧恰好相距该像素数。旧已确认 style 的其他定位字段底层兼容，不能因升级擅改明确偏好；不向新任务提供旧方位菜单。
+
+推荐英文 Arial 42、中文 Microsoft YaHei 46、画面字 Microsoft YaHei 40、描边 1.5、语言间距 8、白色 `&H00FFFFFF`；字体实际可用后按用户最终确认的 records.style 导出。dialogue_en_lines/dialogue_zh_lines 默认各 2，取 1–8 的整数；dialogue_line_height 默认 1.35，取 1–3；三者不缩放。字体必须实际可用并覆盖全部字符，脚本字段检查不证明字形可用。字体族名不能含逗号、花括号、反斜杠或控制字符；英文、中文和画面字可独立指定字体。
 
 每条将导出的记录必须含原文和中文。无法核实时使用清楚的待确认标记与具体说明，不补造原文。`verification` 分为 english / translation / timing / visual；缺省状态作为 pending。`verified` 必须有证据列表，但脚本无法判断证据真假。对白/歌词的 visual 可为 not_applicable，其余三个维度均适用；画面字四个维度均适用。其它适用维度不能标记 not_applicable 来绕过待确认清单。
 
@@ -30,7 +43,7 @@ SRT 使用 UTF-8 BOM、CRLF、连续编号和毫秒时间；对白英文在上�
 
 多个同期记录在全部起止边界处分区，SRT 在每个区间合并所有有效内容，避免重叠事件导致某些播放器漏显示画面字或对白。因此同一条对白可能出现在几个连续的合并区间中；这表示同步的画面内容变化，不是重复识别。每条内容的有效毫秒区间保持不变，事件数量无需与 ASS 相等。画面文字用 `【画面文字】` 标记，缺省 `chinese` 上屏，另可选择 `bilingual`；无论选择哪种，记录保留原文用于核对。对白始终双语。
 
-ASS 使用实际分辨率作为 PlayRes，按已选字体、字号和对白位置导出，推荐简约白字、细黑描边、无阴影。每条对白/歌词分为同时间的 EN、ZH 两个事件，各用独立样式与固定语言带：英文固定底边、中文固定顶边；left/center/right 分别对应 EN `\an1/\an2/\an3`、ZH `\an7/\an8/\an9`，行数变化不移动锚点。语言带按配置容量和行高倍率预留空间，`WrapStyle: 0` 保留自动换行；显式行数超容量会阻止导出，实际自动换行及字体行高是否超出容量仍需渲染验收。真正同期的记录使用选定区域的基础槽位和额外静态槽位，每条 cue 显示期间不换槽，须检查槽位边界和遮挡。固定语言带与槽位的调整方法见 [visual.md](visual.md)。
+ASS 使用实际分辨率作为 PlayRes，按已选字体、字号和底边距导出，推荐白字、细黑描边、无阴影。对白/歌词分为同时间的 EN、ZH 两个事件；新任务水平居中，EN `\an2` 固定英文带底边，ZH `\an8` 固定中文带顶边，行数变化不移动锚点。语言带按固定容量和行高倍率预留空间，`WrapStyle: 0` 保留自动换行；显式行数超容量阻止导出，实际自动换行和字体行高仍须渲染验收。同期 cue 显示期间不换槽，检查边界和遮挡；旧已确认记录按原锚点兼容。详见 [visual.md](visual.md)。
 
 所有 ASS 起止边界使用同一种就近取整到百分秒的规则，每个边界误差最多 5ms；相同毫秒边界得到相同百分秒边界，相邻记录不会因取整新生重叠。取整后起止相同的零时长记录报错，须回到记录核对并修复真实时间轴，不能以扩大时段绕过。原本存在的重叠仍需核对；位置槽位和取整均不代表音画同步已被验证。ASS 事件数按每条包含的对白/歌词 2 个、画面文字 1 个计算，不再等于原始 cue 数量。
 
@@ -40,13 +53,13 @@ ASS 使用实际分辨率作为 PlayRes，按已选字体、字号和对白位�
 
 `onscreen.region` 是字幕显示区域，采用归一化 `[x, y, width, height]`，范围在 0–1 内。视频原文字区另用 `onscreen.source_region` 保存供 OCR/核图，显示区域应避开原文和重要画面；导出不使用 source_region 定位译文。画面文字保留一个独立定位的 ASS 事件，按 region 的上边中点定位，使用左右边距辅助换行，不裁掉越界文字；高度不会自动缩小字号或截断全文。未指定区域时使用画面上部。对白与画面字的并存、遮挡与行高均应通过实际帧检查，区域不是排版质量保证。
 
-导出前通过 `effective_style` 和 `style_digest` 核对完整未缩放 style 的摘要等于已存 `style_sha256`，并检查 `preview_image` 的文件哈希等于 `preview_sha256`；图与配置必须一致。综合效果图缺失或变化时须重新生成并保存匹配记录。导出后须在相同实际字体与渲染器中检查语言带容量、自动换行后的实际行数、实际行高以及横向和垂直溢出；随后连续播放长短句、多行切换、同期对白进出，以及片头、中段、末尾的代表片段确认位置稳定。选择效果图不能代替全片验收，单帧、事件数量、标签或坐标断言不能代替连续播放验收。旧 ASS 不会随 skill 更新自动改变；保留旧文件与记录，按 [排版选择流程](style-selection.md) 确认后在新目录重新导出并验收，不自动覆盖交付成果。
+导出前通过 effective_style/style_digest 核对 style_sha256，并检查 preview_image 文件哈希等于 preview_sha256；图与配置须一致，缺失或变化时重新生成匹配记录。自主审校在内部渲染结果上检查语言带容量、实际行数/行高、横向与垂直溢出；连续播放长短句、多行切换、同期对白进出及开中末片段确认位置稳定。修补内容或排版后重新检查对应区间，完成后才最终导出打包。效果图、单帧和坐标断言不能替代实际复听复看或连续播放。旧 ASS 不自动改变，保留旧文件与记录，不覆盖既有交付。
 
 长书信等可将完整可辨认原文/译文存入 `full_en/full_zh`，`en/zh` 存当前段落对应的原文及译文。当全文与当前段落不同，或 `appendix: true` 时，自动输出同名 `.画面文字全文.txt`，保留原文、译文、时间点、上屏模式、原文对应范围和实际上屏内容。默认 chinese 模式实际只显示中文，英文原文仍完整留档。不能以“镜头太短”为由静默省略全文；模糊字仍保留待确认标记。多段共用同一全文时附录会保留每段的关联 ID，必要时在人工总说明中解释关联。
 
 ## 文件与打包白名单
 
-最终模式每个视频输出同名 `.srt`、`.ass`、`.说明.md`、`.待确认事项.txt` 和 `.漏项检查.txt`，必要时增加 `.画面文字全文.txt`。草稿在原 stem 后加 `.草稿`，如 `Example.草稿.srt`、`Example.草稿.ass`、`Example.草稿.说明.md` 和 `Example.草稿.漏项检查.txt`；建议使用独立草稿目录。草稿说明及文件名明确未完成草稿，manifest 记录 `export_mode: draft`；漏项报告保留缺清单、未映射候选、未扫描段、待核及 scope 外范围，不能命名或描述为全片最终已核。
+最终验收通过后，每个视频输出同名 `.srt`、`.ass`、`.说明.md`、`.待确认事项.txt` 和 `.漏项检查.txt`，必要时增加 `.画面文字全文.txt`。仅内部断点或用户主动要求草稿时保留 `.草稿` 命名，例如 `Example.草稿.srt/ass` 及对应说明/漏项报告，使用独立内部目录并记录 `export_mode: draft`。未经用户主动要求，不发送这些文件链接或字幕包；报告仍保留缺清单、未映射、未扫描、待核及 scope 外范围，不能称全片最终已核。
 
 同目录可存放多集，说明不会互相覆盖。另生成对应 stem 的 `.export.json`，包含明确交付文件名单、大小、SHA-256、SRT 区间与原始 cue ID 的对应关系、交付模式和覆盖报告状态。该记录用于完整性检查，不自动进入 ZIP。ready 仅表示本次 scope 中已记录覆盖条件满足，不证明原片实际已听/看过、译义正确或范围外没有漏项。
 

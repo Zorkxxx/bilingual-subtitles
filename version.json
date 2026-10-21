@@ -1,10 +1,10 @@
 {
-  "skill_version": "1.02",
-  "released": "2026-10-15",
+  "skill_version": "1.03",
+  "released": "2026-10-21",
   "project_schema_version": 1,
   "records_schema_version": 1,
   "library_schema_version": 1,
-  "decisions_revision": 5,
+  "decisions_revision": 6,
   "changes": [
     {
       "version": "1.0.0",
@@ -34,6 +34,12 @@
       "version": "1.02",
       "date": "2026-10-15",
       "summary": "防止整条对白和画面文字漏项：新增独立来源台账、音视频实际复查范围、候选去向及内容指纹对账；最终导出和 QA/交付完成必须通过检查，未完成稿明确标草稿并附漏项报告，排除内容必须保留原因与证据。提供 5 档字号、按实装字形覆盖筛选的更多字体组合，以及九宫格和底部偏高等 10 种固定字幕位置。",
+      "decisions": "references/decisions.md"
+    },
+    {
+      "version": "1.03",
+      "date": "2026-10-21",
+      "summary": "位置选择仅提供底部居中的距底边距离，保留5档基准距离和自定值；首稿仅内部保存，制作后自主核对独立来源、复听复看、修补再复查，默认只交付最终版。正式导出与QA/交付完成共同检查范围内逐条核实状态和未结事项，保留明确范围与真实能力说明。",
       "decisions": "references/decisions.md"
     }
   ]

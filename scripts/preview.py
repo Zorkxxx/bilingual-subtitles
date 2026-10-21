@@ -26,13 +26,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import subtitles
 import fonts
 
-TOOL_VERSION = "1.02"
+TOOL_VERSION = "1.03"
 GROUP_FIELDS = {
     "size": {"font_size_en", "font_size_zh", "font_size_onscreen"},
     "font": {"font_en", "font_zh", "font_onscreen"},
-    "position": {"dialogue_position", "margin_bottom", "margin_top", "dialogue_gap",
-                 "dialogue_en_lines", "dialogue_zh_lines", "dialogue_line_height",
-                 "dialogue_align", "margin_side"},
+    "position": {"dialogue_position", "dialogue_align", "margin_bottom"},
 }
 
 
@@ -74,6 +72,20 @@ def dimensions(records):
     return width, height
 
 
+def position_patch(patch):
+    """New choices vary bottom distance; historical record styles stay intact."""
+    if not isinstance(patch, dict) or not patch or not set(patch) <= GROUP_FIELDS["position"]:
+        raise PreviewError("Position options may change only margin_bottom with fixed bottom/center alignment.")
+    if patch.get("dialogue_position", "bottom") != "bottom" or patch.get("dialogue_align", "center") != "center":
+        raise PreviewError("New position options must use dialogue_position=bottom and dialogue_align=center.")
+    if "margin_bottom" not in patch:
+        raise PreviewError("Position options require an explicit 1080p-base margin_bottom.")
+    value = patch["margin_bottom"]
+    if not subtitles.is_number(value) or not 0 <= value <= 1080:
+        raise PreviewError("margin_bottom must be a finite 1080p-base distance in [0, 1080].")
+    return {**patch, "dialogue_position": "bottom", "dialogue_align": "center"}
+
+
 def read_options(path):
     options = subtitles.read_json(path)
     if not isinstance(options, list) or not options:
@@ -96,6 +108,8 @@ def read_options(path):
         patch = option.get("style")
         if not isinstance(patch, dict) or not patch or not set(patch) <= GROUP_FIELDS[group]:
             raise PreviewError(f"{option_id}: {group} option changes fields outside its group or has an empty patch.")
+        if group == "position":
+            option["style"] = position_patch(patch)
     if groups != set(GROUP_FIELDS):
         raise PreviewError("Provide at least one option in each of size, font, and position.")
     return options
@@ -258,28 +272,18 @@ def presets(args):
                         "recommended": len(seen_pairs) == 1, "font_checks": {"en": en, "zh": zh, "onscreen": screen_font}})
         if len(seen_pairs) == 6:
             break
-    vertical_labels = {"top": "顶部", "middle": "中部", "bottom": "底部"}
-    horizontal_labels = {"left": "左对齐", "center": "居中", "right": "右对齐"}
-    for vertical in vertical_labels:
-        for horizontal in horizontal_labels:
-            options.append({"id": f"pos-{vertical}-{horizontal}",
-                            "label": vertical_labels[vertical] + " · " + horizontal_labels[horizontal], "group": "position",
-                            "style": {"dialogue_position": vertical, "dialogue_align": horizontal,
-                                      "margin_top": 60, "margin_bottom": 60, "margin_side": 60},
-                            "recommended": base["dialogue_position"] == vertical and base.get("dialogue_align", "center") == horizontal
-                                            and base["margin_bottom"] == 60 and base["margin_top"] == 60
-                                            and base.get("margin_side", 60) == 60})
-    options.append({"id": "pos-bottom-raised", "label": "底部偏高 · 居中（下边距 120）", "group": "position",
-                    "style": {"dialogue_position": "bottom", "dialogue_align": "center", "margin_bottom": 120,
-                              "margin_top": 60, "margin_side": 60},
-                    "recommended": base["dialogue_position"] == "bottom" and base.get("dialogue_align", "center") == "center"
-                                    and base["margin_bottom"] == 120})
+    for distance in (40, 60, 90, 120, 160):
+        options.append({"id": f"pos-bottom-{distance:03}",
+                        "label": f"距底部 {distance}px（基准1080p）" + (" · 推荐" if distance == 60 else ""),
+                        "group": "position", "style": {"dialogue_position": "bottom", "dialogue_align": "center",
+                                                         "margin_bottom": distance},
+                        "recommended": distance == 60})
     if records_path.read_bytes() != original_bytes:
         raise PreviewError("Records changed while preparing choices; no options file was committed.")
     subtitles.atomic_write(destination, subtitles.json_bytes(options), force=False)
-    return {"options": str(destination), "font_checks": str(report_path), "counts": {"size": 5, "font": len(seen_pairs), "position": 10},
+    return {"options": str(destination), "font_checks": str(report_path), "counts": {"size": 5, "font": len(seen_pairs), "position": 5},
             "records_modified": False, "selection_status": "pending",
-            "display_guidance": "按字号、字体、位置分组分轮展示效果图，可先显示推荐和少量候选；收到实际回复后再组合选择。可编辑选项或提供自定参数，不能自动采用推荐。"}
+            "display_guidance": "按字号、字体、距底部距离分组分轮展示效果图，可先显示推荐和少量候选；收到实际回复后再组合选择，不能自动采用推荐。自定义位置选项只填margin_bottom，工具固定底部居中；距离以1080p中文预留语言带底边为基准，按视频高度缩放。"}
 
 
 def executable(path):
@@ -494,6 +498,8 @@ def select(args):
             patch = item.get("style")
             if not isinstance(patch, dict) or not patch or not set(patch) <= GROUP_FIELDS[group]:
                 raise PreviewError(f"{option_id}: invalid cross-group style patch.")
+            if group == "position" and position_patch(patch) != patch:
+                raise PreviewError(f"{option_id}: render the normalized bottom/center position option again before selecting it.")
             if item.get("effective_style") != {**base, **patch} or item.get("style_sha256") != style_hash({**base, **patch}):
                 raise PreviewError(f"{option_id}: style metadata is inconsistent.")
             checked_asset(item["image"], out, item["image_sha256"])
