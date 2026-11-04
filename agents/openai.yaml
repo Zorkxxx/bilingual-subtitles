@@ -1,4 +1,4 @@
 interface:
-  display_name: "影视双语字幕制作与校对"
-  short_description: "分轮选字幕效果图，建立独立来源台账检查对白和画面字漏项，再校对交付双语字幕"
-  default_prompt: "使用 $bilingual-subtitles，先分轮展示字号、字体和位置效果图供我选择，建立独立来源台账并复查漏项，再制作和校对双语字幕，说明未核范围并打包交付。"
+  display_name: "影视多语言字幕翻译与校对"
+  short_description: "翻译多语种影视字幕，展示样式效果图并查漏校对，交付原文与简体中文双语字幕"
+  default_prompt: "使用 $bilingual-subtitles，确认视频实际原语言，译为简体中文，展示字号、字体和位置效果图供我选择，制作双语字幕并核对对白及画面文字漏项，说明未核范围后打包交付。"

@@ -9,6 +9,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -17,7 +18,7 @@ import tempfile
 from datetime import datetime, timezone
 import uuid
 
-VERSION = "1.02"
+VERSION = "1.03"
 STAGES = ("inspect", "references", "transcription", "translation", "timing", "visual", "qa", "delivery")
 STAGE_STATES = ("pending", "in_progress", "draft", "complete", "stale")
 DEFAULT_STYLE = {"font_en": "Arial", "font_zh": "Microsoft YaHei", "font_onscreen": "Microsoft YaHei",
@@ -114,6 +115,13 @@ def fingerprint(path, full=False):
     return result
 
 
+def validate_language(value):
+    """Accept language tags with subtags while excluding paths and control text."""
+    if not isinstance(value, str) or len(value) > 63 or not re.fullmatch(r"[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*", value):
+        raise ValueError("Language must be a valid-looking language tag such as ja, ko, de, fr or zh-Hans")
+    return value
+
+
 def validate_cues(records):
     if type(records.get("schema_version")) is not int or records.get("schema_version") != 1 or not isinstance(records.get("cues"), list):
         raise ValueError("Invalid records schema/cues")
@@ -126,6 +134,8 @@ def validate_cues(records):
         for key in ("en", "zh"):
             if not isinstance(cue.get(key), str):
                 raise ValueError(f"{cid}: {key} must be a string")
+        if "source_language" in cue:
+            validate_language(cue["source_language"])
         start, end = cue.get("start_ms"), cue.get("end_ms")
         if type(start) is not int or type(end) is not int or start < 0 or end <= start:
             raise ValueError(f"{cid}: invalid interval")
@@ -177,9 +187,22 @@ def locate(manifest, work, video_id):
 
 
 def init(args):
+    source_language = validate_language(getattr(args, "source_language", "en"))
+    target_language = validate_language(getattr(args, "target_language", "zh-Hans"))
+    if target_language.lower() != "zh-hans":
+        raise ValueError("This subtitle skill currently translates to Simplified Chinese (zh-Hans).")
+    target_language = "zh-Hans"
     work = Path(args.work_dir).resolve()
     task_path = work / "project.json"
     paths = [Path(p).resolve(strict=True) for p in args.video]
+    video_languages = getattr(args, "video_language", None)
+    if video_languages is not None:
+        if len(video_languages) != len(paths):
+            raise ValueError("Provide exactly one --video-language per --video, in the same order")
+        video_languages = [validate_language(tag) for tag in video_languages]
+    else:
+        video_languages = [source_language] * len(paths)
+    project_language = video_languages[0] if len(set(video_languages)) == 1 else "mul"
     if len(set(paths)) != len(paths) or len({p.stem.casefold() for p in paths}) != len(paths):
         raise ValueError("Duplicate video or output basename; use separate task directories")
     work.mkdir(parents=True, exist_ok=True)
@@ -190,10 +213,11 @@ def init(args):
         if records_dir.exists() and any(records_dir.iterdir()):
             raise ValueError("Nonempty records directory; inspect existing work before initializing")
         videos = []
-        for path in paths:
+        for path, video_language in zip(paths, video_languages):
             vid = "video-" + uuid.uuid4().hex[:12]
             fp = fingerprint(path, args.hash)
             records = {"schema_version": 1, "revision": 0, "skill_version": VERSION,
+                       "language_original": video_language, "language_translation": target_language,
                        "video": {"id": vid, "path": str(path), "basename": path.stem,
                                  "duration_ms": None, "width": None, "height": None, "fingerprint": fp},
                        "review_scope": "尚未进行听辨、翻译或画面核验。", "sources": [], "cues": [], "pending": [],
@@ -206,10 +230,10 @@ def init(args):
                            "stages": {s: {"status": "pending"} for s in STAGES}})
         manifest = {"schema_version": 1, "skill_version": VERSION, "task_id": uuid.uuid4().hex,
                     "created_at": now(), "revision": 0, "videos": videos,
-                    "config": {"language_original": "en", "language_translation": "zh-Hans",
+                    "config": {"language_original": project_language, "language_translation": target_language,
                                "encoding": "utf-8-sig", "newline": "CRLF", "style": DEFAULT_STYLE.copy(),
                                "onscreen_mode": "chinese", "library_path": str(Path(args.library).resolve()) if args.library else str(default_library()),
-                               "decisions_revision": 5, "style_selection": {"status": "pending"}}, "glossary": [], "history": []}
+                               "decisions_revision": 9, "style_selection": {"status": "pending"}}, "glossary": [], "history": []}
         write(task_path, manifest)
     return {"project": str(task_path), "videos": [{"id": v["id"], "records": str(work / v["records"])} for v in videos]}
 
@@ -282,8 +306,10 @@ def mutate(args, operation):
                     exporter = importlib.util.module_from_spec(spec)
                     spec.loader.exec_module(exporter)
                     audit = exporter.lint_records(records)
-                    if audit["errors"] or not audit["coverage"]["ready"]:
-                        raise ValueError("Missing source items or unreviewed ranges remain; run coverage.py audit before completing qa/delivery")
+                    final_issues = exporter.final_delivery_issues(records, audit)
+                    if final_issues:
+                        raise ValueError("Missing source items or unreviewed ranges, subtitle checks, or unresolved items prevent qa/delivery:\n" +
+                                         "\n".join(f"{item['at']}: {item['message']}" for item in final_issues))
                 parameters = load_json(args.parameters) if args.parameters else {}
                 artifacts = [fingerprint(p, True) for p in args.artifact]
                 video["stages"][args.stage] = {"status": args.status, "at": now(), "evidence": args.evidence,
@@ -318,7 +344,7 @@ def apply_patch(args):
         records = copy.deepcopy(original)
         cues = {c["id"]: c for c in records["cues"]}
         touched = set()
-        allowed = {"en", "zh", "start_ms", "end_ms", "include", "kind", "speaker", "verification", "unresolved", "onscreen", "slang_ids", "slang_refs", "evidence", "notes", "exclusion_reason", "exclusion_evidence"}
+        allowed = {"en", "zh", "source_language", "start_ms", "end_ms", "include", "kind", "speaker", "verification", "unresolved", "onscreen", "slang_ids", "slang_refs", "evidence", "notes", "exclusion_reason", "exclusion_evidence"}
         for edit in patch.get("edits", []):
             cid = edit["cue_id"]
             if cid not in cues or cid in touched:
@@ -334,7 +360,7 @@ def apply_patch(args):
             previous = copy.deepcopy(cue)
             cue.update(values)
             changes = []
-            if previous["en"] != cue["en"]:
+            if previous["en"] != cue["en"] or previous.get("source_language") != cue.get("source_language"):
                 changes.append("visual" if cue.get("kind") == "onscreen" else "english")
             if previous["zh"] != cue["zh"]:
                 changes.append("translation")
@@ -370,6 +396,9 @@ def main():
     p.add_argument("--work-dir", required=True)
     p.add_argument("--video", action="append", required=True)
     p.add_argument("--library")
+    p.add_argument("--source-language", default="en", help="Original-language tag, e.g. en, ja, ko, de, fr; use und only when truly undetermined")
+    p.add_argument("--video-language", action="append", help="For a mixed-language batch, provide one original-language tag per --video in the same order")
+    p.add_argument("--target-language", choices=["zh-Hans"], default="zh-Hans", help="Simplified Chinese translation (zh-Hans)")
     p.add_argument("--hash", action="store_true", help="Hash complete input files instead of stat-based change detection")
     p = subs.add_parser("status")
     p.add_argument("--work-dir", required=True)

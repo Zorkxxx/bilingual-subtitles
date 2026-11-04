@@ -24,7 +24,7 @@ import zipfile
 
 
 SCHEMA_VERSION = 1
-TOOL_VERSION = "1.02"
+TOOL_VERSION = "1.03"
 STATUSES = {"pending", "draft", "verified", "stale", "not_applicable"}
 DIMENSIONS = ("english", "translation", "timing", "visual")
 KINDS = {"dialogue", "onscreen", "lyric"}
@@ -131,6 +131,25 @@ def coverage_module():
     return _COVERAGE_MODULE
 
 
+def language_codes(records):
+    """Historical en/zh keys store original/translation, independent of their languages."""
+    result = {}
+    for key, field, default in (("en", "language_original", "en"), ("zh", "language_translation", "zh-Hans")):
+        value = records.get(field, default)
+        result[key] = value if isinstance(value, str) and value else default
+    return result
+
+
+def language_label(code):
+    names = {"en": "英文", "ja": "日语", "ko": "韩语", "de": "德语", "fr": "法语",
+             "zh": "中文", "zh-hans": "简体中文", "zh-hant": "繁体中文"}
+    lower = code.lower()
+    if lower in names:
+        return names[lower]
+    base = lower.split("-")[0]
+    return names[base] + f"（{code}）" if base in names else code
+
+
 def lint_records(records, check_coverage=True):
     """Return structural errors and heuristic warnings without modifying records."""
     errors, warnings = [], []
@@ -143,7 +162,7 @@ def lint_records(records, check_coverage=True):
             issue("error", "text_type", where, "Expected a Unicode string.")
             return
         if require and not value.strip():
-            issue("error", "empty_language", where, "Included subtitles require nonempty original and Chinese text; use an honest pending marker if needed.")
+            issue("error", "empty_language", where, "Included subtitles require nonempty original and translated text; use an honest pending marker if needed.")
         if "\ufffd" in value or any(0xD800 <= ord(char) <= 0xDFFF for char in value):
             issue("error", "broken_unicode", where, "Replacement characters or lone surrogates cannot be exported.")
         if any((ord(char) < 32 and char not in "\n\r\t") or ord(char) == 127 for char in value):
@@ -157,6 +176,10 @@ def lint_records(records, check_coverage=True):
         return {"tool_version": TOOL_VERSION, "errors": [{"code": "root_type", "at": "$", "message": "Expected an object."}], "warnings": [], "counts": {}}
     if records.get("schema_version") != SCHEMA_VERSION or not is_integer(records.get("schema_version")):
         issue("error", "schema_version", "schema_version", "Supported schema_version is integer 1.")
+    for field in ("language_original", "language_translation"):
+        if field in records and (not isinstance(records[field], str) or not re.fullmatch(r"[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*", records[field])):
+            issue("error", "language_code", field, "Expected a language tag, for example en, ja, ko, de, fr, zh-Hans or zh-Hant.")
+    language_tags = language_codes(records)
     video = records.get("video")
     if not isinstance(video, dict):
         issue("error", "video_type", "video", "Expected video metadata object.")
@@ -284,15 +307,16 @@ def lint_records(records, check_coverage=True):
                 capacity = style.get(f"dialogue_{language}_lines")
                 if cue.get("kind") in {"dialogue", "lyric"} and is_integer(capacity) and len(display_text(value).split("\n")) > capacity:
                     issue("error", "dialogue_line_capacity", f"{where}.{language}", "Explicit lines exceed the fixed language band; rebreak the cue or increase the task-wide line capacity and rerender.")
-                limit = 64 if language == "en" else 32
+                compact_script = language_tags[language].lower().split("-")[0] in {"zh", "ja", "ko"}
+                limit = 32 if compact_script else 64
                 if any(len(line) > limit for line in display_text(value).split("\n")):
                     issue("warning", "long_line", f"{where}.{language}", f"Line exceeds {limit} characters; rebreak against actual rendering.")
                 if valid_time:
                     count = len(re.sub(r"\s", "", value))
                     cps = count * 1000 / (end - start)
-                    if cps > (25 if language == "en" else 15):
+                    if cps > (15 if compact_script else 25):
                         issue("warning", "reading_speed", f"{where}.{language}", f"Estimated {cps:.1f} nonspace characters/s; timing is not changed automatically.")
-        if include is True and isinstance(cue.get("zh"), str) and not re.search(r"[\u3400-\u9fff\U00020000-\U000323af]", cue["zh"]):
+        if include is True and language_tags["zh"].lower().split("-")[0] == "zh" and isinstance(cue.get("zh"), str) and not re.search(r"[\u3400-\u9fff\U00020000-\U000323af]", cue["zh"]):
             issue("warning", "no_cjk", f"{where}.zh", "No Han characters; check whether this is an intentional number/name/foreign text.")
         verification = cue.get("verification", {})
         if not isinstance(verification, dict):
@@ -393,6 +417,54 @@ def lint_records(records, check_coverage=True):
             "verification_limit": "Structural/heuristic checks only; no audio, meaning, font availability, or visual verification."}
 
 
+def final_delivery_issues(records, report):
+    """Check recorded readiness of all exported cues, without asserting evidence is true.
+
+    Coverage scope controls source review, not which included cues are exported.
+    Lint first: malformed records are reported without attempting this check.
+    """
+    issues = list(report["errors"])
+    if issues:
+        return issues
+    coverage = report.get("coverage")
+    if not coverage or not coverage.get("ready"):
+        issues.append({"code": "coverage_incomplete", "at": "coverage",
+                       "message": "Coverage is incomplete; run coverage.py audit to locate unresolved source items and ranges."})
+
+    included_ids = set()
+    for index, cue in enumerate(records["cues"]):
+        if not cue.get("include", True):
+            continue
+        included_ids.add(cue["id"])
+        for dimension in applicable_dimensions(cue):
+            item = cue.get("verification", {}).get(dimension, {})
+            if item.get("status") != "verified" or not evidence_present(item.get("evidence")):
+                issues.append({"code": "final_verification", "at": f"cues[{index}].verification.{dimension}",
+                               "message": f"Included cue {cue['id']} requires verified {dimension} with recorded evidence."})
+        if cue.get("unresolved"):
+            issues.append({"code": "final_unresolved", "at": f"cues[{index}].unresolved",
+                           "message": f"Included cue {cue['id']} has unresolved issues."})
+
+    scope = (coverage or {}).get("summary", {}).get("scope")
+    for index, item in enumerate(records.get("pending", [])):
+        linked = item.get("cue_ids", [])
+        if linked:
+            relevant = bool(included_ids.intersection(linked))
+        elif scope:
+            start, end = item["start_ms"], item["end_ms"]
+            overlap = (scope["start_ms"] <= start < scope["end_ms"] if start == end else
+                       max(start, scope["start_ms"]) < min(end, scope["end_ms"]))
+            modality = {"audio": "audio", "dialogue": "audio", "lyric": "audio",
+                        "visual": "visual", "onscreen": "visual"}.get(item["kind"])
+            relevant = overlap and (modality is None or scope[modality])
+        else:
+            relevant = True
+        if relevant:
+            issues.append({"code": "final_pending", "at": f"pending[{index}]",
+                           "message": f"Pending item {item['id']} affects this delivery."})
+    return issues
+
+
 def srt_timestamp(milliseconds):
     hours, remainder = divmod(milliseconds, 3600000)
     minutes, remainder = divmod(remainder, 60000)
@@ -465,7 +537,13 @@ def effective_style(records):
 
 
 def style_digest(records):
-    payload = json.dumps(effective_style(records), ensure_ascii=False, sort_keys=True,
+    style = effective_style(records)
+    tags = language_codes(records)
+    # Preserve the exact v1.02 digest for legacy/default language pairs, while
+    # requiring a fresh preview when a different language pair is selected.
+    if tags != {"en": "en", "zh": "zh-Hans"}:
+        style = {"style": style, "language_original": tags["en"], "language_translation": tags["zh"]}
+    payload = json.dumps(style, ensure_ascii=False, sort_keys=True,
                          separators=(",", ":"), allow_nan=False).encode("utf-8")
     return sha256(payload)
 
@@ -569,8 +647,11 @@ def render_ass(records, cues):
 
 def pending_text(records):
     entries = []
+    languages = language_codes(records)
+    legacy = languages == {"en": "en", "zh": "zh-Hans"}
     for cue in records["cues"]:
-        missing = [f"{dimension}={status_of(cue, dimension)}" for dimension in applicable_dimensions(cue)
+        names = {"english": f"原文（{language_label(languages['en'])}）", "translation": f"译文（{language_label(languages['zh'])}）"} if not legacy else {}
+        missing = [f"{names.get(dimension, dimension)}={status_of(cue, dimension)}" for dimension in applicable_dimensions(cue)
                    if status_of(cue, dimension) != "verified"]
         notes = cue.get("unresolved", [])
         if not missing and not notes:
@@ -591,7 +672,11 @@ def pending_text(records):
     return "\n".join(lines) + "\n", len(entries)
 
 
-def appendix_text(cues):
+def appendix_text(cues, records=None):
+    languages = language_codes(records or {})
+    original_label = language_label(languages["en"])
+    target_label = language_label(languages["zh"])
+    legacy = languages == {"en": "en", "zh": "zh-Hans"}
     sections = []
     for cue in sorted(cues, key=lambda item: (item["start_ms"], item["id"])):
         if cue["kind"] != "onscreen":
@@ -603,8 +688,9 @@ def appendix_text(cues):
         mode = info.get("display_mode", "chinese")
         shown = [cue["zh"]] if mode == "chinese" else [cue["en"], cue["zh"]]
         sections += [f"[{cue['id']}] {srt_timestamp(cue['start_ms'])} → {srt_timestamp(cue['end_ms'])}",
-                     "原文：", en, "简体中文：", zh,
-                     f"上屏模式：{mode}（{'仅中文' if mode == 'chinese' else '原文与中文'}）",
+                     "原文：", en, ("简体中文：" if legacy else f"译文（{target_label}）："), zh,
+                     (f"上屏模式：{mode}（{'仅中文' if mode == 'chinese' else '原文与中文'}）" if legacy else
+                      f"上屏模式：{mode}（{'仅译文' if mode == 'chinese' else '原文与译文'}；{original_label} → {target_label}）"),
                      "原文对应范围：", cue["en"], "实际上屏内容：", *shown, ""]
     if not sections:
         return None
@@ -614,6 +700,10 @@ def appendix_text(cues):
 def notes_text(records, report, events, pending_count, has_appendix, draft=False):
     video = records["video"]
     included = [cue for cue in records["cues"] if cue.get("include", True)]
+    languages = language_codes(records)
+    legacy = languages == {"en": "en", "zh": "zh-Hans"}
+    original_label = language_label(languages["en"])
+    target_label = language_label(languages["zh"])
     lines = [f"# {video['basename']} 字幕说明" + ("（未完成草稿）" if draft else ""), "",
              "交付状态：未完成草稿，不能称为完整字幕或全片无漏项。" if draft else "交付状态：来源台账对账与所记录范围复查已完成；仍需按实际听辨、翻译和渲染依据验收。",
              "漏项、排除依据和未复查范围见同名 .漏项检查.txt；程序不会发现尚未进入任何来源候选的内容。", "",
@@ -621,10 +711,10 @@ def notes_text(records, report, events, pending_count, has_appendix, draft=False
              f"核实范围：{records['review_scope']}", "", f"导出记录 {len(included)} 条；SRT 在全部起止边界合并为 {len(events)} 个连续编号区间；ASS 按语言独立定位，事件数可不同。",
              f"待确认清单 {pending_count} 项；格式检查 {len(report['errors'])} 个错误、{len(report['warnings'])} 个提示。",
              "格式与编码检查仅检查记录及导出文本；不会替代实际听音、语义审校、字体可用性或画面核对。", "",
-             "SRT 与 ASS 均为 UTF-8 BOM / CRLF。对白英文在上、简体中文在下；SRT 字体与样式取决于播放器。",
-             "ASS 对白/歌词每条导出英文、中文两个独立定位事件，画面文字每条一个事件；位置不随另一语言的行数变化。",
-             "ASS 字号、描边、边距和语言间距按视频高度从 1080p 基准缩放。默认每种语言预留两行，英文底边与中文顶边分别固定；实际字体行高和自动换行须渲染核对。",
-             f"所用字体：英文 {effective_style(records)['font_en']}；中文 {effective_style(records)['font_zh']}。1080p 基准字号：英文 {effective_style(records)['font_size_en']}；中文 {effective_style(records)['font_size_zh']}。位置：{effective_style(records)['dialogue_position']} / {effective_style(records)['dialogue_align']}。",
+             ("SRT 与 ASS 均为 UTF-8 BOM / CRLF。对白英文在上、简体中文在下；SRT 字体与样式取决于播放器。" if legacy else f"SRT 与 ASS 均为 UTF-8 BOM / CRLF。对白原文（{original_label}）在上、译文（{target_label}）在下；SRT 字体与样式取决于播放器。"),
+             ("ASS 对白/歌词每条导出英文、中文两个独立定位事件，画面文字每条一个事件；位置不随另一语言的行数变化。" if legacy else "ASS 对白/歌词每条导出原文和译文两个独立定位事件，画面文字每条一个事件；位置不随另一语言的行数变化。"),
+             ("ASS 字号、描边、边距和语言间距按视频高度从 1080p 基准缩放。默认每种语言预留两行，英文底边与中文顶边分别固定；实际字体行高和自动换行须渲染核对。" if legacy else "ASS 字号、描边、边距和语言间距按视频高度从 1080p 基准缩放。默认每种语言预留两行，原文底边与译文顶边分别固定；实际字体行高和自动换行须渲染核对。"),
+             (f"所用字体：英文 {effective_style(records)['font_en']}；中文 {effective_style(records)['font_zh']}。1080p 基准字号：英文 {effective_style(records)['font_size_en']}；中文 {effective_style(records)['font_size_zh']}。位置：{effective_style(records)['dialogue_position']} / {effective_style(records)['dialogue_align']}。" if legacy else f"所用字体：原文（{original_label}）{effective_style(records)['font_en']}；译文（{target_label}）{effective_style(records)['font_zh']}。1080p 基准字号：原文 {effective_style(records)['font_size_en']}；译文 {effective_style(records)['font_size_zh']}。位置：{effective_style(records)['dialogue_position']} / {effective_style(records)['dialogue_align']}。"),
              "同期对白使用独立固定槽位，每条在整个显示期间不换槽；底部/中部的额外槽位向上，顶部的额外槽位向下，需核对画面遮挡。字体未随包提供。",
              "ASS 全部边界统一就近取整到百分之一秒，误差不超过 5 ms，相邻边界不会因取整制造重叠；SRT 保留毫秒。",
              "画面文字在 ASS 独立放置，SRT 使用【画面文字】标记并与同期对白合并；事件数量和排版可以不同。",
@@ -639,7 +729,8 @@ def notes_text(records, report, events, pending_count, has_appendix, draft=False
             if dimension in applicable_dimensions(cue):
                 status = status_of(cue, dimension)
                 counts[status] = counts.get(status, 0) + 1
-        lines.append(f"- {dimension}：" + ("，".join(f"{key} {counts[key]}" for key in sorted(counts)) or "不适用"))
+        dimension_label = ({"english": f"原文（{original_label}）", "translation": f"译文（{target_label}）"}.get(dimension, dimension) if not legacy else dimension)
+        lines.append(f"- {dimension_label}：" + ("，".join(f"{key} {counts[key]}" for key in sorted(counts)) or "不适用"))
     lines += ["", "## 参考来源与剪辑版本核对", ""]
     for source in records.get("sources", []):
         lines += [f"- [{source['id']}] {source['title']}", f"  来源：{source['url'] or '本地来源，未提供网页链接'}",
@@ -754,8 +845,12 @@ def export_records(records_path, out, force=False, draft=False):
     if report["errors"]:
         raise SubtitleError("Export blocked by record errors:\n" + "\n".join(f"{item['at']}: {item['message']}" for item in report["errors"]))
     coverage = report["coverage"]
-    if not draft and not coverage["ready"]:
-        raise SubtitleError("Coverage is incomplete; run coverage.py audit to locate missing source items and unreviewed ranges. Use --draft only for explicitly unfinished progress.")
+    if not draft:
+        final_issues = final_delivery_issues(records, report)
+        if final_issues:
+            raise SubtitleError("Final export blocked by unfinished review:\n" +
+                                "\n".join(f"{item['at']}: {item['message']}" for item in final_issues) +
+                                "\nUse --draft only for explicitly unfinished progress.")
     if records.get("style_selection", {}).get("status") == "pending":
         raise SubtitleError("Show the subtitle size/font/position previews and wait for the user's choice before final export.")
     selection = records.get("style_selection", {})
@@ -772,7 +867,7 @@ def export_records(records_path, out, force=False, draft=False):
     events = srt_events(cues)
     basename = records["video"]["basename"] + (".草稿" if draft else "")
     pending, pending_count = pending_text(records)
-    appendix = appendix_text(cues)
+    appendix = appendix_text(cues, records)
     ass_count = sum(1 if cue["kind"] == "onscreen" else 2 for cue in cues)
     payloads = {
         f"{basename}.srt": subtitle_bytes(render_srt(events)),
@@ -798,6 +893,9 @@ def export_records(records_path, out, force=False, draft=False):
                 "warnings": report["warnings"],
                 "srt_intervals": [{key: event[key] for key in ("start_ms", "end_ms", "cue_ids")} for event in events],
                 "verification_limit": report["verification_limit"]}
+    if "language_original" in records or "language_translation" in records:
+        tags = language_codes(records)
+        manifest.update(language_original=tags["en"], language_translation=tags["zh"])
     manifest_name = f"{basename}.export.json"
     payloads[manifest_name] = json_bytes(manifest)
     out = Path(out)

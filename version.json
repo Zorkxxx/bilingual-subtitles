@@ -1,10 +1,10 @@
 {
-  "skill_version": "1.02",
-  "released": "2026-10-15",
+  "skill_version": "1.03",
+  "released": "2026-11-04",
   "project_schema_version": 1,
   "records_schema_version": 1,
   "library_schema_version": 1,
-  "decisions_revision": 5,
+  "decisions_revision": 9,
   "changes": [
     {
       "version": "1.0.0",
@@ -35,6 +35,33 @@
       "date": "2026-10-15",
       "summary": "防止整条对白和画面文字漏项：新增独立来源台账、音视频实际复查范围、候选去向及内容指纹对账；最终导出和 QA/交付完成必须通过检查，未完成稿明确标草稿并附漏项报告，排除内容必须保留原因与证据。提供 5 档字号、按实装字形覆盖筛选的更多字体组合，以及九宫格和底部偏高等 10 种固定字幕位置。",
       "decisions": "references/decisions.md"
+    },
+    {
+      "version": "1.02+multilingual",
+      "date": "2026-11-04",
+      "summary": "本地多语言构建：按实际原语言制作原文与简体中文双语字幕，支持日韩德法等，保留历史字段与旧任务兼容；预览按实际语种与文字检查已安装字体，语言变化使相关复核和样式确认失效。",
+      "decisions": "references/decisions.md"
+    },
+    {
+      "version": "1.02+multilingual-quality",
+      "date": "2026-11-04",
+      "summary": "本地翻译质量优化：增加多语种上下文和逐条语义复核流程，并要求实际交付字幕的适用核验项与未决问题在最终导出前完成；沿用原有模型和数据结构。",
+      "decisions": "references/decisions.md"
+    },
+    {
+      "version": "1.02+multilingual-local-audio",
+      "date": "2026-11-04",
+      "summary": "本地音频识别：使用本地多语言语音模型生成带时间的原文候选并纳入字幕复核流程，不配置 API Key；识别候选不自动视为人工听辨或核验通过。",
+      "decisions": "references/decisions.md"
+    },
+    {
+      "version": "1.03",
+      "date": "2026-11-04",
+      "summary": "新增多语原文到简体中文、本地无密钥语音候选、场景化翻译复核与最终交付核验；保留独立来源台账及旧任务兼容。",
+      "decisions": "references/decisions.md"
     }
-  ]
+  ],
+  "base_version": "1.02",
+  "updated": "2026-11-04",
+  "distribution_status": "release"
 }

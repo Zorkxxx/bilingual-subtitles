@@ -26,7 +26,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import subtitles
 import fonts
 
-TOOL_VERSION = "1.02"
+TOOL_VERSION = "1.03"
+COMPATIBLE_MANIFEST_VERSIONS = {"1.02", "1.02+multilingual", TOOL_VERSION}
 GROUP_FIELDS = {
     "size": {"font_size_en", "font_size_zh", "font_size_onscreen"},
     "font": {"font_en", "font_zh", "font_onscreen"},
@@ -34,6 +35,46 @@ GROUP_FIELDS = {
                  "dialogue_en_lines", "dialogue_zh_lines", "dialogue_line_height",
                  "dialogue_align", "margin_side"},
 }
+
+# Keys are BCP-47 language prefixes. They are style examples, never transcriptions.
+LANGUAGE_SAMPLES = {
+    "en": "[STYLE SAMPLE] This is a subtitle style preview.",
+    "zh": "【样式示例】这是字幕字号、字体与位置效果。",
+    "ja": "これは字幕のスタイル見本です。",
+    "ko": "이 문장은 자막 스타일을 보여 주는 예시입니다.",
+    "de": "Dies ist eine Vorschau für die Untertitelgestaltung.",
+    "fr": "Ceci est un aperçu du style des sous-titres.",
+    "es": "Esta es una muestra del estilo de subtítulos.",
+    "pt": "Esta é uma amostra do estilo das legendas.",
+    "it": "Questa è un'anteprima dello stile dei sottotitoli.",
+    "ru": "Это образец оформления субтитров.",
+    "ar": "هذا مثال لشكل الترجمة على الشاشة.",
+    "hi": "यह उपशीर्षक शैली का एक नमूना है।",
+    "th": "นี่คือตัวอย่างรูปแบบคำบรรยาย",
+    "vi": "Đây là bản xem trước kiểu phụ đề.",
+    "id": "Ini adalah contoh tampilan takarir.",
+    "tr": "Bu, altyazı biçimi için bir örnektir.",
+    "nl": "Dit is een voorbeeld van de ondertitelstijl.",
+}
+PREFERRED_FONTS = {
+    "ja": ["Yu Gothic", "Yu Gothic UI", "Meiryo", "MS Gothic", "Noto Sans CJK JP", "Noto Sans JP"],
+    "ko": ["Malgun Gothic", "Gulim", "Batang", "Noto Sans CJK KR", "Noto Sans KR"],
+    "zh": ["Microsoft YaHei", "SimHei", "SimSun", "DengXian", "KaiTi", "FangSong", "Noto Sans CJK SC", "Noto Sans SC"],
+    "ar": ["Segoe UI", "Arial", "Noto Naskh Arabic", "Noto Sans Arabic"],
+    "hi": ["Nirmala UI", "Mangal", "Noto Sans Devanagari"],
+    "th": ["Leelawadee UI", "Tahoma", "Noto Sans Thai"],
+}
+
+
+def language_tag(records, field, fallback):
+    tag = records.get(field, fallback)
+    if not isinstance(tag, str) or not re.fullmatch(r"[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*", tag):
+        raise PreviewError(f"Invalid {field}; supply a language tag or omit it for legacy English/Chinese records.")
+    return tag
+
+
+def language_prefix(tag):
+    return tag.split("-", 1)[0].lower()
 
 
 class PreviewError(Exception):
@@ -52,8 +93,15 @@ def full_style(records):
     return subtitles.effective_style(records)
 
 
-def style_hash(style):
-    return subtitles.style_digest({"style": style})
+def style_hash(style, records=None):
+    # Bind language when present, while retaining the v1.02 digest for the
+    # legacy English/Chinese pair. Preview and final export share one contract.
+    payload = {"style": style}
+    if records is not None:
+        for field in ("language_original", "language_translation"):
+            if field in records:
+                payload[field] = records[field]
+    return subtitles.style_digest(payload)
 
 
 def load_records(path):
@@ -102,17 +150,35 @@ def read_options(path):
 
 
 def example(records):
+    source_tag = language_tag(records, "language_original", "en")
+    target_tag = language_tag(records, "language_translation", "zh-Hans")
     items = sorted((cue for cue in records.get("cues", [])
                     if isinstance(cue, dict) and cue.get("include", True)
-                    and cue.get("kind") in {"dialogue", "lyric"}
+                    and cue.get("kind", "dialogue") in {"dialogue", "lyric"}
                     and isinstance(cue.get("en"), str) and cue["en"].strip()
                     and isinstance(cue.get("zh"), str) and cue["zh"].strip()),
                    key=lambda item: (item.get("start_ms", 0), item.get("id", "")))
     if items:
         return {"en": items[0]["en"], "zh": items[0]["zh"],
-                "kind": "recorded_dialogue", "source_cue_id": items[0].get("id")}
-    return {"en": "[STYLE SAMPLE] This is a subtitle style preview.",
-            "zh": "【样式示例】这是字幕字号、字体与位置效果。",
+                "kind": "recorded_dialogue", "source_cue_id": items[0].get("id"),
+                "language_original": source_tag, "language_translation": target_tag}
+    supplied = records.get("preview_sample", {})
+    if not isinstance(supplied, dict):
+        raise PreviewError("preview_sample must be an object with original/translation sample strings.")
+    def language_sample(field, tag):
+        custom = supplied.get(field)
+        if custom is not None:
+            if not isinstance(custom, str) or not custom.strip():
+                raise PreviewError(f"preview_sample.{field} must be nonempty text.")
+            return custom
+        if tag.lower().startswith(("zh-hant", "zh-tw", "zh-hk", "zh-mo")):
+            return "【樣式範例】這是字幕字體、大小與位置預覽。"
+        sample = LANGUAGE_SAMPLES.get(language_prefix(tag))
+        if sample is None:
+            raise PreviewError(f"No built-in sample for {tag}; provide preview_sample.{field} in that language or a recorded dialogue cue.")
+        return sample
+    return {"en": language_sample("original", source_tag), "zh": language_sample("translation", target_tag),
+            "language_original": source_tag, "language_translation": target_tag,
             "kind": "labelled_example", "source_cue_id": None}
 
 
@@ -149,15 +215,13 @@ def font_inventory():
 
 
 def candidate_faces(inventory, names, language):
-    """Keep the current family first, then real recommended families only."""
+    """Prefer specified families, then inspect actual installed families as fallback."""
     rows = []
     used = set()
     available = inventory["fonts"]
-    if language == "zh":
-        names = [*names, *sorted({item["family"] for item in available
-                                 if isinstance(item.get("family"), str)
-                                 and item["family"].startswith("Noto")
-                                 and any(marker in item["family"] for marker in ("CJK", "SC", "Hans"))})]
+    if language != "onscreen":
+        names = [*names, *PREFERRED_FONTS.get(language_prefix(language), []),
+                 *sorted({item["family"] for item in available if isinstance(item.get("family"), str)})]
     for preferred in names:
         if not isinstance(preferred, str) or not preferred:
             continue
@@ -179,7 +243,7 @@ def candidate_faces(inventory, names, language):
     return rows
 
 
-def covered_families(candidates, text, checks_dir, language):
+def covered_families(candidates, text, checks_dir, language, limit=6):
     text_path = checks_dir / f"{language}-sample.txt"
     text_path.write_text(text, encoding="utf-8")
     accepted, reports = [], []
@@ -196,6 +260,8 @@ def covered_families(candidates, text, checks_dir, language):
         reports.append(evidence)
         if result == 0 and report.get("all_covered") is True:
             accepted.append(evidence)
+            if len(accepted) >= limit:
+                break
     return accepted, reports
 
 
@@ -217,11 +283,13 @@ def presets(args):
     destination.parent.mkdir(parents=True, exist_ok=True)
     inventory = font_inventory()
     checks_dir = Path(tempfile.mkdtemp(prefix=destination.stem + "-font-checks-", dir=destination.parent))
-    en_candidates = candidate_faces(inventory, [base["font_en"], "Arial", "Segoe UI", "Tahoma",
-                                                 "Georgia", "Consolas", "Times New Roman"], "en")
-    zh_candidates = candidate_faces(inventory, [base["font_zh"], "Microsoft YaHei", "SimHei", "SimSun",
-                                                 "DengXian", "KaiTi", "FangSong", "Noto Sans CJK SC", "Noto Sans SC"], "zh")
-    zh_text = sample["zh"] + "\n【示意背景，非实际片源】【字幕样式预览】"
+    source_tag, target_tag = sample["language_original"], sample["language_translation"]
+    en_candidates = candidate_faces(inventory, [base["font_en"], *PREFERRED_FONTS.get(language_prefix(source_tag), []),
+                                                "Arial", "Segoe UI", "Tahoma", "Georgia", "Consolas", "Times New Roman"], source_tag)
+    zh_candidates = candidate_faces(inventory, [base["font_zh"], *PREFERRED_FONTS.get(language_prefix(target_tag), []),
+                                                "Arial", "Segoe UI", "Tahoma"], target_tag)
+    marker = "【示意背景，非实际片源】【字幕样式预览】" if language_prefix(target_tag) == "zh" else "[ILLUSTRATIVE BACKGROUND] [STYLE PREVIEW]"
+    zh_text = sample["zh"] + "\n" + marker
     english, en_reports = covered_families(en_candidates, sample["en"], checks_dir, "en")
     chinese, zh_reports = covered_families(zh_candidates, zh_text, checks_dir, "zh")
     onscreen, onscreen_reports = [], []
@@ -231,14 +299,16 @@ def presets(args):
     font_report = {"tool_version": TOOL_VERSION, "records": str(records_path), "created_at": now(),
                    "sample": sample, "inventory_directories": inventory["directories"],
                    "inventory_errors": inventory["errors"], "english": en_reports, "chinese": zh_reports,
+                   "language_original": source_tag, "language_translation": target_tag,
+                   "original": en_reports, "translation": zh_reports,
                    "current_onscreen": onscreen_reports,
                    "scope": "Installed-font inventory and sample cmap coverage; real FFmpeg font selection is still checked during render/select."}
     subtitles.atomic_write(report_path, subtitles.json_bytes(font_report), force=False)
     if not english or not chinese:
-        raise PreviewError(f"No sample-covering English/Chinese font combination is available; no options selected or installed. Inspect {report_path}.")
+        raise PreviewError(f"No sample-covering font combination is installed for {source_tag}/{target_tag}; inspect {report_path}. No font was installed or selected.")
     options = []
     for code, en_size, zh_size in (("xs", 28, 32), ("s", 34, 38), ("m", 42, 46), ("l", 50, 54), ("xl", 58, 62)):
-        options.append({"id": "size-" + code, "label": f"{code.upper()}：英文 {en_size} / 中文 {zh_size}（1080p 基准）",
+        options.append({"id": "size-" + code, "label": f"{code.upper()}：原文 {en_size} / 译文 {zh_size}（1080p 基准）",
                         "group": "size", "style": {"font_size_en": en_size, "font_size_zh": zh_size},
                         "recommended": base["font_size_en"] == en_size and base["font_size_zh"] == zh_size})
     seen_pairs = set()
@@ -249,7 +319,7 @@ def presets(args):
             continue
         seen_pairs.add(pair)
         screen_font = onscreen[0] if len(seen_pairs) == 1 and onscreen else zh
-        label = f"英文 {en['family']} / 中文 {zh['family']}"
+        label = f"原文 {en['family']} / 译文 {zh['family']}"
         if screen_font["family"] != zh["family"]:
             label += f" / 画面字 {screen_font['family']}"
         options.append({"id": f"font-{len(seen_pairs):02}", "label": label,
@@ -358,7 +428,11 @@ def render_one(original, style, sample, bg_info, ffmpeg, stage, stem):
     data, lint_warnings = sample_records(original, style, sample)
     ass_text = subtitles.render_ass(data, data["cues"])
     width, height = dimensions(original)
-    label = "【示意背景，非实际片源】" if bg_info["kind"] == "abstract" else "【字幕样式预览】"
+    target = language_tag(original, "language_translation", "zh-Hans")
+    if language_prefix(target) == "zh":
+        label = "【示意背景，非实际片源】" if bg_info["kind"] == "abstract" else "【字幕样式预览】"
+    else:
+        label = "[ILLUSTRATIVE BACKGROUND]" if bg_info["kind"] == "abstract" else "[STYLE PREVIEW]"
     # Fixed small corner label is informational, separate from the final layout.
     size = max(12, round(22 * height / 1080))
     label_text = "{\\an7\\pos(12,12)\\fs" + str(size) + "}" + subtitles.ass_escape(label)
@@ -408,14 +482,14 @@ def render(args):
             style = {**base, **option["style"]}
             stem = "option-" + option["id"]
             result = render_one(original, style, sample, bg_info, ffmpeg, stage, stem)
-            rendered_options.append({**option, "effective_style": style, "style_sha256": style_hash(style),
+            rendered_options.append({**option, "effective_style": style, "style_sha256": style_hash(style, original),
                                      "image": str(out / f"{stem}.png"), "ass": str(out / f"{stem}.ass"),
                                      "render_log": str(out / f"{stem}.ffmpeg.log"), **result})
         if records_path.read_bytes() != original_bytes:
             raise PreviewError("Records changed while rendering; no preview manifest was committed.")
         manifest = {"schema_version": 1, "tool_version": TOOL_VERSION, "created_at": now(),
                     "records": str(records_path), "records_sha256": sha(original_bytes),
-                    "base_style": base, "base_style_sha256": style_hash(base),
+                    "base_style": base, "base_style_sha256": style_hash(base, original),
                     "background": bg_info, "renderer": renderer, "sample": sample,
                     "options": rendered_options, "font_validation": "Caller must check actual fonts and glyph coverage with fonts.py; fontselect logs are recorded here."}
         publish_stage(stage, out)
@@ -463,7 +537,7 @@ def select(args):
     manifest_path = Path(args.manifest).resolve(strict=True)
     subtitles.reject_links(manifest_path)
     manifest = subtitles.read_json(manifest_path)
-    if not isinstance(manifest, dict) or manifest.get("schema_version") != 1 or manifest.get("tool_version") != TOOL_VERSION:
+    if not isinstance(manifest, dict) or manifest.get("schema_version") != 1 or manifest.get("tool_version") not in COMPATIBLE_MANIFEST_VERSIONS:
         raise PreviewError("Unsupported preview manifest.")
     out = manifest_path.parent
     selected_image = out / "selected-preview.png"
@@ -476,7 +550,7 @@ def select(args):
         if Path(manifest["records"]).resolve() != records_path or sha(original_bytes) != manifest["records_sha256"]:
             raise PreviewError("Records changed since the previews; render a fresh session before confirming.")
         base = full_style(original)
-        if style_hash(base) != manifest["base_style_sha256"] or base != manifest["base_style"]:
+        if style_hash(base, original) != manifest["base_style_sha256"] or base != manifest["base_style"]:
             raise PreviewError("The preview base style no longer matches these records.")
         option_ids = {"size": args.size, "font": args.font, "position": args.position}
         candidates = manifest.get("options", [])
@@ -494,7 +568,7 @@ def select(args):
             patch = item.get("style")
             if not isinstance(patch, dict) or not patch or not set(patch) <= GROUP_FIELDS[group]:
                 raise PreviewError(f"{option_id}: invalid cross-group style patch.")
-            if item.get("effective_style") != {**base, **patch} or item.get("style_sha256") != style_hash({**base, **patch}):
+            if item.get("effective_style") != {**base, **patch} or item.get("style_sha256") != style_hash({**base, **patch}, original):
                 raise PreviewError(f"{option_id}: style metadata is inconsistent.")
             checked_asset(item["image"], out, item["image_sha256"])
             style.update(patch)
@@ -514,14 +588,14 @@ def select(args):
                                    + "; ".join(result["font_warnings"]))
             updated = copy.deepcopy(original)
             updated["style"] = style
-            updated["style_selection"] = {"status": "confirmed", "style_sha256": style_hash(style),
+            updated["style_selection"] = {"status": "confirmed", "style_sha256": style_hash(style, updated),
                 "option_ids": option_ids, "confirmation": confirmation, "preview_image": str(selected_image),
                 "preview_sha256": result["image_sha256"], "confirmed_at": now(), "renderer": renderer,
                 "actual_fontselect": result["actual_fontselect"], "font_warnings": result["font_warnings"]}
             updated["revision"] = original.get("revision", 0) + 1
             updated.setdefault("history", []).append({"action": "style_selection", "at": now(),
-                "tool_version": TOOL_VERSION, "before_style_sha256": style_hash(base),
-                "style_sha256": style_hash(style), "option_ids": option_ids, "confirmation": confirmation,
+                "tool_version": TOOL_VERSION, "before_style_sha256": style_hash(base, original),
+                "style_sha256": style_hash(style, updated), "option_ids": option_ids, "confirmation": confirmation,
                 "preview_image": str(selected_image), "preview_sha256": result["image_sha256"]})
             # Validate the same style hash contract used by final export.
             check, _ = sample_records(updated, style, manifest["sample"])

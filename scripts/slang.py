@@ -22,7 +22,7 @@ STATUSES = ("candidate", "verified", "deprecated")
 BASES = ("audio_check", "reference_check", "human_correction")
 SEMANTIC_FIELDS = {
     "expression", "variants", "sense", "region", "era", "register", "relationship",
-    "scope", "work", "translations", "evidence", "verification",
+    "scope", "work", "translations", "evidence", "verification", "source_language",
 }
 
 
@@ -91,6 +91,20 @@ def normalize(value: str) -> str:
     value = value.translate(str.maketrans({"’": "'", "‘": "'", "“": '"', "”": '"',
                                          "–": "-", "—": "-"}))
     return " ".join(value.split())
+
+
+def recorded_language(entry):
+    """Legacy absent or non-tag values remain unknown, never infer a language."""
+    value = entry.get("source_language")
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*", value):
+        return None
+    value = value.casefold()
+    return None if value in {"und", "unknown"} else value
+
+
+def validate_new_language(value):
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*", value):
+        raise LibraryError("source_language must be a language tag such as ja, ko, de, fr, en or und")
 
 
 def validate_entry(entry, label: str = "entry"):
@@ -162,7 +176,7 @@ def validate_verification(entry):
 
 
 def dedup_key(entry):
-    return tuple(normalize(entry[key]) for key in ("expression", "sense", "scope", "work"))
+    return tuple(normalize(entry[key]) for key in ("expression", "sense", "scope", "work")) + (recorded_language(entry),)
 
 
 def validate_library(document):
@@ -260,6 +274,8 @@ def add(args):
         raise LibraryError("entry.status is invalid")
     if "revision" in entry:
         raise LibraryError("new entry revision is assigned by the library; omit revision")
+    if "source_language" in entry:
+        validate_new_language(entry["source_language"])
     entry.setdefault("id", f"slang-{uuid.uuid4().hex}")
     for field in ("variants", "translations", "evidence", "usage_refs"):
         entry.setdefault(field, [])
@@ -271,6 +287,7 @@ def add(args):
     if "verification" in entry:
         entry["submitted_verification"] = entry.pop("verification")
     validate_entry(entry)
+    uncertain_matches = []
     directory = Path(args.library).expanduser().resolve()
     with exclusive(directory):
         document = load_library(directory)
@@ -280,11 +297,17 @@ def add(args):
             if dedup_key(existing) == dedup_key(entry):
                 raise LibraryError(f"duplicate expression/sense/scope/work matches id {existing['id']}; "
                                    "existing entry was not changed")
+            if dedup_key(existing)[:-1] == dedup_key(entry)[:-1] and (recorded_language(existing) is None or recorded_language(entry) is None):
+                uncertain_matches.append(existing['id'])
         document["entries"].append(entry)
         record_change(document, "add", None, entry, "new candidate; verification requires explicit revise")
         atomic_write(directory, document)
-    return {"action": "added", "entry": entry, "library_revision": document["revision"],
-            "requested_status": requested_status, "verification_required": True}
+    result = {"action": "added", "entry": entry, "library_revision": document["revision"],
+              "requested_status": requested_status, "verification_required": True}
+    if uncertain_matches:
+        result["potential_unknown_language_duplicates"] = uncertain_matches
+        result["language_note"] = "Possible duplicate has unknown language; compare manually without assigning a language automatically."
+    return result
 
 
 def revise(args):
@@ -300,6 +323,8 @@ def revise(args):
         integer(expected, "_expected_revision", 1)
     if not patch:
         raise LibraryError("patch has no changes after its expected revision is removed")
+    if "source_language" in patch:
+        validate_new_language(patch["source_language"])
     directory = Path(args.library).expanduser().resolve()
     with exclusive(directory):
         document = load_library(directory)
@@ -335,8 +360,10 @@ def revise(args):
             "check_affected_cues": True}
 
 
-def contains_phrase(query: str, expression: str) -> bool:
+def contains_phrase(query: str, expression: str, cjk_substring=False) -> bool:
     escaped = re.escape(normalize(expression)).replace(r"\ ", r"\s+")
+    if cjk_substring and re.search(r"[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]", expression):
+        return bool(escaped and re.search(escaped, query))
     return bool(escaped and re.search(r"(?<!\w)" + escaped + r"(?!\w)", query))
 
 
@@ -345,7 +372,14 @@ def search(args):
     string(args.query, "query", nonempty=True)
     query = normalize(args.query)
     query_tokens = set(re.findall(r"\w+", query))
-    results = []
+    language_filter = getattr(args, "source_language", None)
+    if language_filter is not None:
+        validate_new_language(language_filter)
+        language_filter = recorded_language({"source_language":language_filter})
+        if language_filter is None:
+            raise LibraryError("Select a known source language; undetermined legacy entries are shown separately.")
+    cjk_substring = bool(language_filter and language_filter.split('-')[0] in {'ja','ko','zh'})
+    results, unknown_results = [], []
     for entry in document["entries"]:
         if entry["status"] == "deprecated":
             continue
@@ -353,9 +387,12 @@ def search(args):
             continue
         if entry["scope"] == "work" and (not args.work or normalize(entry["work"]) != normalize(args.work)):
             continue
-        if contains_phrase(query, entry["expression"]):
+        entry_language = recorded_language(entry)
+        if language_filter and entry_language not in (None, language_filter):
+            continue
+        if contains_phrase(query, entry["expression"], cjk_substring):
             score, match = 100, "expression"
-        elif any(contains_phrase(query, item) for item in entry["variants"]):
+        elif any(contains_phrase(query, item, cjk_substring) for item in entry["variants"]):
             score, match = 90, "variant"
         else:
             expression_tokens = set(re.findall(r"\w+", normalize(entry["expression"])))
@@ -376,10 +413,18 @@ def search(args):
                 hints.append("region differs; check applicability")
         if entry["status"] == "candidate":
             hints.append("UNVERIFIED CANDIDATE")
-        results.append({"score": score, "match": match, "context_hints": hints, "entry": entry})
+        if language_filter and entry_language is None:
+            hints.append("SOURCE LANGUAGE UNKNOWN: manually verify before use")
+            unknown_results.append({"score": score, "match": match, "context_hints": hints, "entry": entry})
+        else:
+            results.append({"score": score, "match": match, "context_hints": hints, "entry": entry})
     results.sort(key=lambda item: (-item["score"], item["entry"]["id"]))
-    return {"library_revision": document["revision"], "query": args.query, "results": results,
-            "retrieval": "literal phrases/variants/partial keywords; no semantic or context verification"}
+    response = {"library_revision": document["revision"], "query": args.query, "results": results,
+                "retrieval": "literal phrases/variants/partial keywords; no semantic or context verification"}
+    if language_filter:
+        unknown_results.sort(key=lambda item: (-item["score"], item["entry"]["id"]))
+        response.update(source_language=language_filter, unknown_language_results=unknown_results)
+    return response
 
 
 def impacts(args):
@@ -426,6 +471,7 @@ def parser():
     command.add_argument("--query", required=True)
     command.add_argument("--work")
     command.add_argument("--region")
+    command.add_argument("--source-language", help="Exact source language tag; unknown legacy entries are shown separately.")
     command.add_argument("--include-candidates", action="store_true")
     command.set_defaults(run=search)
     command = commands.add_parser("revise", help="revise with preserved history and evidence")

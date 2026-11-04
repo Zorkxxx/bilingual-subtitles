@@ -17,7 +17,7 @@ import re
 import sys
 import tempfile
 
-VERSION = "1.02"
+VERSION = "1.03"
 KINDS = {"dialogue", "lyric", "onscreen"}
 REVIEW_CODES = {"coverage_review_pending", "coverage_review_stale", "coverage_review_evidence"}
 
@@ -56,12 +56,19 @@ def coverage_digest(records):
     cues = []
     for cue in records.get("cues", []):
         row = {key: cue.get(key) for key in cue_keys}
+        if "source_language" in cue:
+            row["source_language"] = cue["source_language"]
         row["include"] = cue.get("include", True)
         screen = cue.get("onscreen", {})
         row["onscreen"] = {key: screen.get(key) for key in screen_keys} if isinstance(screen, dict) else screen
         cues.append(row)
     basis = {"video": {k: video.get(k) for k in ("id", "path", "basename", "duration_ms", "width", "height", "fingerprint")},
              "coverage": {k: cov.get(k) for k in ("schema_version", "scope", "items", "scans", "expected_item_ids", "inventory_evidence")}, "cues": cues}
+    original_language = records.get("language_original", "en")
+    translated_language = records.get("language_translation", "zh-Hans")
+    # Explicitly recording the old default must not invalidate a legacy review.
+    if (original_language, translated_language) != ("en", "zh-Hans"):
+        basis["languages"] = {"language_original": original_language, "language_translation": translated_language}
     data = json.dumps(basis, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
     return hashlib.sha256(data.encode("utf-8")).hexdigest()
 

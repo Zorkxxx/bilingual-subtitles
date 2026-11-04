@@ -1,5 +1,7 @@
 # 持久俚语与习语库
 
+记录跨语种表达时保留实际原语言、地域和语境，原语写原字而非先译成英文，释义与首选译法使用简体中文。为新条目填写 `source_language`（例如 `ja`、`ko`、`de`、`fr`、`en`）；语种未知时省略该字段或用 `und`，不可猜测。已有条目缺少语言或旧值不是标准语言标签时均视为语言未知，保留原值与核实证据，不自动归类为英文或任何其他语言。
+
 将知识库放在用户选定的持久目录，通过 `--library` 指定；不要保存在 skill 安装目录，也不要把任务临时文件当作唯一副本。首版使用 Python 3.10+ 标准库脚本 `scripts/slang.py`，无网络或模型依赖。
 
 ## 数据与来源
@@ -12,6 +14,7 @@
 | --- | --- |
 | `id` | 稳定字符串；省略时新增自动生成，修订不能改动 |
 | `expression`, `sense` | 必填字符串：表达及这一条的特定含义 |
+| `source_language` | 可选原语言标签，如 `ja`、`ko`、`de`、`fr`、`en`；`und` 或缺省为未知；新写入和修改使用语言标签，不自动改写旧条目 |
 | `variants` | 字符串数组，词形或口语变体 |
 | `region`, `era`, `register`, `relationship` | 地域、时代、语气强度与人物关系；省略默认为空字符串 |
 | `scope`, `work` | `general` 可跨作品；`work` 限定作品且必须填写 `work`；通用条目的 `work` 为空 |
@@ -21,7 +24,7 @@
 | `usage_refs` | 对象数组，记录使用处，可填记录文件、稳定字幕 ID、来源版本等 |
 | `verification` | 升级为已核实时必须提供的核实记录，见下文 |
 
-同一个表达可以有多条含义或适用作品。仅当归一化后的 `expression + sense + scope + work` 完全一致时拒绝重复；报告已有 ID，不合并或覆盖。不要只靠词形相同合并含义，也不要把多次出现当作已核实的依据。
+同一个表达可以有多条含义或适用作品。仅当归一化后的 `expression + sense + scope + work + source_language` 完全一致时拒绝重复；语言标签大小写不敏感，其他部分精确匹配。不同明确语种不合并。语言未知与明确语种可分别保留，存在同形同义的未知语言记录时新增结果列出待人工比对的旧 ID，不自动合并或推断语种；两个均未知且其余键相同的条目仍视为重复。新逻辑无需迁移已有库，也不修改旧条目或引用。
 
 ## 操作
 
@@ -31,6 +34,7 @@
 python scripts/slang.py init --library <持久目录>
 python scripts/slang.py add --library <持久目录> --entry <条目.json>
 python scripts/slang.py search --library <持久目录> --query "完整对白或表达" --work "作品名" --region "UK"
+python scripts/slang.py search --library <持久目录> --query "完整原文对白" --source-language ja
 python scripts/slang.py search --library <持久目录> --query "表达" --include-candidates
 python scripts/slang.py revise --library <持久目录> --id <稳定ID> --patch <补丁.json> --reason "修订依据"
 python scripts/slang.py impacts --library <持久目录> --id <稳定ID> --records <字幕记录.json> --records <另一集记录.json>
@@ -58,11 +62,11 @@ python scripts/slang.py impacts --library <持久目录> --id <稳定ID> --recor
 }
 ```
 
-`basis` 可为 `audio_check`、`reference_check` 或 `human_correction`，`source` 必须出现在证据数组中，`note` 不能为空。填入真实依据后再升级；脚本只校验记录结构，不证明核实内容真实。核实只适用于这一义项和记录的语境。已核实条目的表达、义项、语境、译法或证据发生变更，且补丁没有新的显式核实记录时，会退回候选并标注旧核实已失效。修改使用记录不会自动影响核实状态。历史保留旧核实信息。
+`basis` 可为 `audio_check`、`reference_check` 或 `human_correction`，`source` 必须出现在证据数组中，`note` 不能为空。填入真实依据后再升级；脚本只校验记录结构，不证明核实内容真实。核实只适用于这一义项和记录的语境。已核实条目的原语言、表达、义项、语境、译法或证据发生变更，且补丁没有新的显式核实记录时，会退回候选并标注旧核实已失效。修改使用记录不会自动影响核实状态。历史保留旧核实信息。
 
 ## 调用与纠正影响
 
-默认仅检索已核实的通用条目以及 `--work` 匹配的作品条目；候选必须显式开启并带未核实标志，停用条目不参与检索。跨作品不调用作品专属条目。字面短语及变体优先，统一大小写、英式引号和空白，检查词边界；部分词汇匹配排在后面。地域只提供排序提示，不据此保证适用。首版不提供语义向量或自动语境判断：使用结果前仍需结合人物关系、时代、语气和当前对白判断。
+默认仅检索已核实的通用条目以及 `--work` 匹配的作品条目；候选必须显式开启并带未核实标志，停用条目不参与检索。跨作品不调用作品专属条目。未指定 `--source-language` 时保留旧版跨语言检索行为；指定后主 `results` 只含该完整语言标签的结果（大小写不敏感，`ja` 与 `ja-JP` 分别匹配），旧的未知语言条目单列于 `unknown_language_results` 并提示先人工核对，不能按查询语种自动认定或采用。日、韩、中文的指定语种查询允许在连续文字内匹配原词；地域只提供排序提示，不保证适用。结果仍需结合人物关系、时代、语气和当前对白判断。
 
 字幕统一记录的 `cues[].slang_ids` 保存所用稳定 ID。条目修订后，`impacts` 列出这些文件中受影响的字幕 ID，不自动重写旧字幕；回到原视频语境重审后再导出。首版不会检出缺少链接的历史用法，也不会根据条目自动追踪外部文件，因此记录链接及输入版本应在翻译时保存。
 
